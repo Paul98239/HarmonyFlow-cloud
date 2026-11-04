@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Harmony Flow</title>
+
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎹</text></svg>">
+
+  <link rel="stylesheet" href="./src/styles.css">
+
+  <!-- 音色庫 preload 在 HTML 解析階段就把請求發出去；之後 SpessaSynth（fetch soundfont）載入同一個 URL 時直接沿用背景下載好的
+       回應，不會重抓。網址必須跟 src/midi/synth.js 的 SOUNDFONT_URLS[0] 逐字相同，不然預載白費；本地副本只在 CDN 失敗時才載，不預載。
+       姿勢模型不預載：它要等使用者選了現場人數才會用到（可能永遠不選），預載了卻沒在幾秒內用掉，Chrome 會在 console 報黃色警告；
+       改由 src/vision/vision.js 的 warmPoseModel() 在開機完成後用低優先序 fetch 暖機。
+       modulepreload 讓本地 module graph 平行下載而不是逐層瀑布。 -->
+  <link rel="preload" as="fetch" href="https://cdn.jsdelivr.net/gh/spessasus/SpessaSynth@6f75050/soundfonts/GeneralUserGS.sf3" crossorigin>
+
+  <link rel="modulepreload" href="./src/main.js">
+  <link rel="modulepreload" href="./src/ui.js">
+  <link rel="modulepreload" href="./src/input/keyboard.js">
+  <link rel="modulepreload" href="./src/input/gestureTrigger.js">
+  <link rel="modulepreload" href="./src/midi/synth.js">
+  <link rel="modulepreload" href="./src/midi/midiPlayer.js">
+  <link rel="modulepreload" href="./src/midi/midiParser.js">
+  <link rel="modulepreload" href="./src/midi/midiFile.js">
+  <link rel="modulepreload" href="./src/midi/timeline.js">
+  <link rel="modulepreload" href="./src/midi/parts.js">
+  <link rel="modulepreload" href="./src/midi/scheduler.js">
+  <link rel="modulepreload" href="./src/midi/voices.js">
+  <link rel="modulepreload" href="./src/midi/tempo.js">
+  <link rel="modulepreload" href="./src/midi/performancePlan.js">
+  <link rel="modulepreload" href="./src/midi/ensemble.js">
+  <link rel="modulepreload" href="./src/midi/midiApi.js">
+  <link rel="modulepreload" href="./src/vision/vision.js">
+  <link rel="modulepreload" href="./src/vision/tracking.js">
+  <link rel="modulepreload" href="./src/vision/gesture.js">
+  <link rel="modulepreload" href="./src/vision/poseWorker.js">
+</head>
+<body>
+  <video id="webcam" playsinline></video>
+
+  <!-- 版面骨架（HTML-first：所有靜態 UI 都寫在這裡，JS 只綁行為與填動態清單）：
+       #app-shell 佔滿視窗，flex 置中一個鎖 16:9 的 #camera-frame（F11 進出全螢幕時只是等比例縮放，裁切一致就穩定；見 src/styles.css），攝影機畫面永久蓋著黑幕（#stage-blackout）。
+       頂端置中疊一欄 #top-center-stack（position:fixed，不受 #camera-frame 的 overflow:hidden 裁切）：播放 pill（#toolbar-playback）在上，系統控制／選歌控制列（#control-row）在下，垂直分層、水平都置中，結構上不會互相遮蔽。
+       panel-system 是常駐系統控制 bar，panel-song 是觸發鈕＋彈出面板（釘在整排控制列正下方置中，見 src/styles.css 的 .tl-popup）。
+       攝影機容器不能用 JS 在執行期搬動（vision.js 在模組頂層就抓 #webcam／#gl-canvas／#overlay-canvas／#stage-hint）；#stage-hint 是舞台中央的提示，absolute 定位、不佔 #stage 的 grid 格。
+       唯一會重複的結構「分譜列」放在 <template id="tpl-part-row">，由 JS clone 後填聲部名。
+       #app-shell 的 inert：開機期間整個 app 惰性（點不到、Tab 不到），src/ui.js 收起載入畫面時解除。
+       控制項的行為經 data-action（click）／data-field（change／input）委派到 #top-center-stack（src/ui.js）。
+       #topProgressBar 是獨立於 #top-center-stack 之外的 #app-shell 直接子元素，見下方元素本身的註解。 -->
+  <div id="app-shell" inert>
+    <!-- 頂端進度條：純視覺、跨滿攝影機外框寬度、不可互動、不顯示時間文字。進度是播放頭（scheduler.getPositionTicks()）換算成原譜秒數後佔總長的比例——輔助聲部停格等你時靜止、你放行新的起音組時跳一下，事件驅動，不做補間動畫。
+         用 <progress>：天生唯讀、不接點擊／拖曳、不會被 Tab 聚焦。要回到開頭用播放列的重播鈕；不做拖曳 seek（要連動各槽位的游標與輔助聲部的時鐘，工程量偏大）。 -->
+    <progress id="topProgressBar" class="top-progress-bar" max="1" value="0" aria-label="播放進度" hidden></progress>
+    <div id="top-center-stack">
+      <!-- 播放 pill：四顆獨立按鈕（▶ 播放／❚❚ 暫停／↻ 重播／♪ 試聽，互相防呆：哪顆能按由 midiPlayer.js 的 transportButtonState() 決定，不能按的 disabled）＋歌名（完整顯示、不用省略號截斷）。
+           ♪ 是進出試聽（官方 Sequencer）的開關，試聽中黃底；試聽中 ▶ ❚❚ ↻ 作用在試聽。is-empty＝還沒有能播放的歌（idle／載入中），控制列的淡化條件靠它。
+           按鈕 icon 是 inline SVG、不是字型字元：圖畫在 24×24 座標裡、重心對齊 (12,12)，viewBox 把它放在按鈕正中央，置中由向量座標保證，不受字型與像素取整影響（見 styles.css 的 .tb-icon）。 -->
+      <div id="toolbar-playback" class="toolbar-playback is-empty">
+        <div id="transport-group" class="tb-transport" role="group" aria-label="播放控制">
+          <button id="btnPlay" class="btn tb-btn tb-play" type="button" data-action="play" disabled aria-label="播放">
+            <svg class="tb-icon" viewBox="-12 -12 48 48" aria-hidden="true"><path class="tb-ico-play" d="M7.333 4L7.333 20L21.333 12Z"/><g class="tb-ico-loading"><circle cx="4.5" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="19.5" cy="12" r="2.2"/></g></svg>
+          </button>
+          <button id="btnPause" class="btn tb-btn tb-pause" type="button" data-action="pause" disabled aria-label="暫停">
+            <svg class="tb-icon" viewBox="-12 -12 48 48" aria-hidden="true"><path d="M6 5H10.5V19H6ZM13.5 5H18V19H13.5Z"/></svg>
+          </button>
+          <button id="btnReplay" class="btn tb-btn tb-replay" type="button" data-action="replay" disabled aria-label="重播">
+            <svg class="tb-icon" viewBox="-12 -12 48 48" aria-hidden="true"><g transform="translate(0.832 0.161)"><path d="M12 5.2A6.8 6.8 0 1 0 18.8 12" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M12 1.6L17.2 5.2L12 8.8Z"/></g></svg>
+          </button>
+          <button id="btnPreview" class="btn tb-btn tb-preview" type="button" data-action="preview" disabled aria-label="開啟試聽">
+            <svg class="tb-icon" viewBox="-12 -12 48 48" aria-hidden="true"><g transform="translate(1.006 -1.13)"><ellipse cx="8" cy="18" rx="3.7" ry="2.8" transform="rotate(-20 8 18)"/><path d="M10.6 17.4V3.5H12.6V17.4Z"/><path d="M12.6 3.5C13.4 8 19.5 8.6 19 14C18 10.8 15 10.6 12.6 9.6Z"/></g></svg>
+          </button>
+        </div>
+        <div id="midiStatusText" class="player-status-bar">等待選擇歌曲...</div>
+      </div>
+      <div class="control-row" id="control-row">
+        <!-- 系統控制：鏡頭開關／現場人數／重置骨架 ID。人數同時是 MediaPipe 的 numPoses 與追蹤槽位數（1~4），
+             沒有預設值；還沒選之前 vision.js 不推論。 -->
+        <div id="panel-system" class="tl-widget tl-bar">
+          <button id="btn-camera-toggle" class="btn tl-text-btn" type="button" data-action="camera-toggle" aria-label="鏡頭開關">鏡頭</button>
+          <select id="poseCountSelect" class="tl-select" data-field="pose-count" aria-label="現場人數">
+            <option value="" selected disabled>人數</option>
+            <option value="1">1 人</option>
+            <option value="2">2 人</option>
+            <option value="3">3 人</option>
+            <option value="4">4 人</option>
+          </select>
+          <button id="btn-reset-pose" class="btn tl-text-btn" type="button" data-action="reset-pose" aria-label="重置骨架 ID">重置</button>
+          <div id="system-note" class="tl-note" hidden></div>
+        </div>
+        <div class="tl-widget">
+          <button id="song-toggle" class="btn tl-trigger" type="button" data-action="toggle-panel" data-panel="song">選歌</button>
+          <!-- 選歌面板：選曲＋分譜。#scorePartSection 預設隱藏，選到的 MIDI 有任何聲部時才浮現（單聲部也能指派給 PC 鍵盤手）。
+               .tl-scroll 是面板內真正捲動的那一層；✕ 是外殼的 absolute 子元素，不會跟著內容捲走。 -->
+          <div id="panel-song" class="tl-popup" hidden>
+            <button class="btn tl-close" type="button" data-action="close-panel" aria-label="關閉">✕</button>
+            <div class="tl-scroll">
+              <div class="player-input-group">
+                <div class="file-picker">
+                  <label for="localMidiInput" class="btn file-picker-btn">選擇檔案</label>
+                  <input type="file" id="localMidiInput" accept=".mid,.midi" class="file-picker-input" data-field="local-file">
+                  <!-- 超出欄位寬度的名稱用 .mq 跑馬燈頭尾相連 loop（見 styles.css 的「跑馬燈」）；文字由 ui.js 的 setMarqueeText() 寫入 -->
+                  <span id="localMidiFileName" class="mq file-picker-name"><span class="mq-main">未選擇檔案</span><span class="mq-loop" aria-hidden="true"><span class="mq-track" data-text="未選擇檔案"></span></span></span>
+                </div>
+                <div class="player-row">
+                  <select id="midiCategory" class="player-input" data-field="category"></select>
+                  <input type="search" id="midiSongQuery" class="player-input" data-field="song-query" placeholder="搜尋歌曲" autocomplete="off">
+                </div>
+                <!-- 原生 <select>：展開後的選項清單寬度由瀏覽器自己決定，刻意不做自訂下拉。關著時顯示的已選歌名，
+                     超出欄位寬度的部分原生下拉會直接截斷，所以在它上面疊一份鏡像文字（#midiSongMirror，.mq 跑馬燈，不吃點擊、
+                     對讀屏隱藏），文字由 midiPlayer.js 跟著選項同步。 -->
+                <div class="select-mq">
+                  <select id="midiSongSelect" class="player-input" data-field="song" disabled>
+                    <option value="">請選擇歌曲</option>
+                  </select>
+                  <span id="midiSongMirror" class="mq" aria-hidden="true"><span class="mq-main">請選擇歌曲</span><span class="mq-loop"><span class="mq-track" data-text="請選擇歌曲"></span></span></span>
+                </div>
+              </div>
+              <div id="scorePartSection" hidden>
+                <div id="scoreInfoText" class="score-info-text"></div>
+                <div id="scorePartList" class="score-part-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="camera-frame">
+      <div id="stage">
+        <div id="canvas-container">
+          <canvas id="gl-canvas"></canvas>
+          <canvas id="overlay-canvas"></canvas>
+          <!-- 永久黑幕：攝影機畫面刻意不顯示，鏡頭與追蹤照常在背景運作（見 vision.js），
+               這裡純粹是視覺遮蓋，沒有任何切換方式。 -->
+          <div id="stage-blackout"></div>
+        </div>
+        <div id="stage-hint" role="status" aria-live="polite" hidden></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 分譜清單的一列：聲部名（GM 繁中音色名）＋「指派演奏者」下拉（無／PC 鍵盤手／演奏者 1~N，N ＝ 現場人數）。
+       src/midi/midiPlayer.js clone 這個 template，用 textContent 填名字、new Option 填選項。 -->
+  <template id="tpl-part-row">
+    <div class="score-part-row">
+      <span class="mq score-part-name"><span class="mq-main"></span><span class="mq-loop" aria-hidden="true"><span class="mq-track" data-text=""></span></span></span>
+      <select class="score-part-id player-input" data-field="part-assign" aria-label="指派演奏者"></select>
+    </div>
+  </template>
+
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div id="loading-status">正在初始化⋯</div>
+  </div>
+
+  <div id="error-overlay">
+    <div id="error-message">發生錯誤</div>
+    <div class="detail" id="error-detail"></div>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
