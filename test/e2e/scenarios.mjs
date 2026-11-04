@@ -162,3 +162,106 @@ SCENARIOS.scoreViewAllSongs = async ({ page, url, out }) => {
   const stats = await page.evaluate(() => window.__scoreViewStats());
   if (!(stats.平均ms < 3)) throw new Error(`樂譜面板每幀平均 ${stats.平均ms}ms`);
 };
+
+// ─── 階段 4：上場防呆 ───
+const mulberry = (seed) => () => { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+const enabled = (page, sel) => page.locator(sel).isEnabled();
+const WAVER = (cx) => ({ cx, cy: 0.35, scale: 0.15, amp: 1.2, periodMs: 1250 });
+
+// 選歌、指派、現場人數、開鏡頭、播放……的順序怎麼打亂都不會卡住：每一步之後「有歌又沒在處理」時播放或暫停至少一個能按；最後一定能播
+async function randomOrder(page, url, out, seed) {
+  await installFakePose(page, [WAVER(0.4)]);
+  await boot(page, url);
+  const r = mulberry(seed), pick = (xs) => xs[Math.floor(r() * xs.length)];
+  const songs = ['duet', 'quartet', 'canonRests', 'solo', 'smpte', 'pickup'];
+  let loaded = false, log = [];
+  const parts = () => page.locator('#scorePartList .score-part-id').count();
+  const ops = {
+    song: async () => { await loadLocal(page, out, pick(songs)); loaded = true; },
+    assignKb: async () => { const n = await parts(); if (n) await assignPart(page, Math.floor(r() * n), 'kb'); },
+    assignId: async () => { const n = await parts(); const c = Number(await page.locator('#poseCountSelect').inputValue()) || 0; if (n && c) await assignPart(page, Math.floor(r() * n), String(1 + Math.floor(r() * c))); },
+    unassign: async () => { const n = await parts(); if (n) await assignPart(page, Math.floor(r() * n), ''); },
+    mode: async () => { await openSongPanel(page); const m = page.locator('#scorePartList .score-part-mode:not([disabled])'); if (await m.count()) await m.first().selectOption(pick(['auto', 'musician', 'onset', 'beat'])); },
+    count: async () => { await setPoseCount(page, 1 + Math.floor(r() * 4)); await page.waitForTimeout(200); },
+    camera: async () => { await page.waitForFunction(() => !document.getElementById('btn-camera-toggle').disabled); await page.click('#btn-camera-toggle'); await page.waitForTimeout(400); },
+    play: async () => { if (await enabled(page, '#btnPlay')) { await page.click('#btnPlay'); await page.waitForTimeout(500); } },
+    pause: async () => { if (await enabled(page, '#btnPause')) await page.click('#btnPause'); },
+    replay: async () => { if (await enabled(page, '#btnReplay')) { await page.click('#btnReplay'); await page.waitForTimeout(400); } },
+    keys: async () => { await closePanel(page); await page.focus('body'); for (const k of ['KeyF', 'KeyJ', 'KeyF']) { await page.keyboard.press(k); await page.waitForTimeout(250); } },
+    people: async () => { await page.evaluate((p) => window.__fakePose.set(p), pick([[], [WAVER(0.4)], [WAVER(0.3), WAVER(0.7)]])); },
+    reset: async () => { await page.click('#btn-reset-pose'); },
+    preview: async () => { if (await enabled(page, '#btnPreview')) { await page.click('#btnPreview'); await page.waitForTimeout(600); } },
+  };
+  const names = Object.keys(ops);
+  for (let i = 0; i < 16; i++) {
+    const op = i === 3 && !loaded ? 'song' : pick(names);
+    log.push(op);
+    await ops[op]();
+    const st = await page.evaluate(() => ({ busy: document.getElementById('toolbar-playback').classList.contains('is-empty'), play: !document.getElementById('btnPlay').disabled, pause: !document.getElementById('btnPause').disabled, loading: document.getElementById('btnPlay').classList.contains('is-loading') }));
+    if (loaded && !st.busy && !st.loading && !st.play && !st.pause) {
+      await page.waitForTimeout(1500);   // 處理中（載入、續播）最多等一下
+      const again = await page.evaluate(() => !document.getElementById('btnPlay').disabled || !document.getElementById('btnPause').disabled);
+      if (!again) throw new Error(`種子 ${seed}：卡住了（播放與暫停都不能按），步驟：${log.join(' → ')}`);
+    }
+  }
+  // 最後：一定能播。離開試聽、確定有歌、指派給 PC 鍵盤手，按播放、按鍵要能放行
+  if (await page.locator('#btnPreview').evaluate((b) => b.classList.contains('is-current'))) await page.click('#btnPreview');
+  if (!loaded) await loadLocal(page, out, 'duet');
+  await assignPart(page, 0, 'kb');
+  await closePanel(page);
+  if (await enabled(page, '#btnPlay')) await page.click('#btnPlay');
+  await page.waitForFunction(() => !document.getElementById('btnPause').disabled, null, { timeout: 15000 }).catch(() => { throw new Error(`種子 ${seed}：最後按不了播放，步驟：${log.join(' → ')}`); });
+  await page.focus('body');
+  const before = (await page.evaluate(() => window.__pressLog().presses.filter((p) => p.released).length));
+  for (let i = 0; i < 5; i++) { await page.keyboard.press(i % 2 ? 'KeyJ' : 'KeyF'); await page.waitForTimeout(350); }
+  const after = await page.evaluate(() => window.__pressLog().presses.filter((p) => p.released || p.result === 'beat').length);
+  const fin = await page.evaluate(() => document.getElementById('btnPlay').disabled === false && document.getElementById('btnPause').disabled);
+  if (after <= before && !fin) throw new Error(`種子 ${seed}：最後按鍵都沒有放行，步驟：${log.join(' → ')}`);
+}
+// 預設 6 組種子；RANDOM_SEEDS=30 node test/e2e/run.mjs 可以多跑（種子 1000 起）
+const extraSeeds = Number(process.env.RANDOM_SEEDS || 0);
+for (const seed of [11, 22, 33, 44, 55, 66, ...Array.from({ length: extraSeeds }, (_, i) => 1000 + i)]) SCENARIOS[`randomOrder${seed}`] = ({ page, url, out }) => randomOrder(page, url, out, seed);
+
+// 演奏者一直沒被偵測到：舞台中央請他面向鏡頭；背對鏡頭（看不到臉）也不會被鎖定；轉過來就消失、可以演奏
+SCENARIOS.faceTheCamera = async ({ page, url, out }) => {
+  await installFakePose(page, [{ ...WAVER(0.5), faceVisible: false }]);
+  await boot(page, url);
+  await setPoseCount(page, 1);
+  await loadLocal(page, out, 'duet');
+  await assignPart(page, 0, '1');
+  await closePanel(page);
+  await page.waitForTimeout(3000);
+  const hint = await page.locator('#stage-hint').innerText();
+  if (!/演奏者 1/.test(hint) || !/面向鏡頭/.test(hint)) throw new Error(`沒有請他面向鏡頭：「${hint}」`);
+  await play(page);
+  await page.waitForTimeout(2500);
+  const hud = await page.locator('#performer-hud').innerText();
+  if (!/請面向鏡頭/.test(hud)) throw new Error(`狀態列沒有提示：${hud}`);
+  if ((await page.evaluate(() => window.__pressLog().presses.length)) > 0) throw new Error('背對鏡頭（看不到臉）卻被鎖定、觸發了');
+  await page.evaluate((p) => window.__fakePose.set(p), [WAVER(0.5)]);
+  await page.waitForTimeout(5000);
+  if (!(await page.locator('#stage-hint').isHidden())) throw new Error(`轉過來之後提示還在：${await page.locator('#stage-hint').innerText()}`);
+  const n = await page.evaluate(() => window.__pressLog().presses.filter((p) => p.slot === 1).length);
+  if (n < 2) throw new Error(`轉過來之後揮了 5 秒只觸發 ${n} 下`);
+};
+
+// 現場人數選 3、只有 1 個人：多出來的 ID 標成「未偵測到」；指派給沒出現的 ID 的聲部不擋別人，在場的人照樣演奏
+SCENARIOS.ghostIds = async ({ page, url, out }) => {
+  await installFakePose(page, [WAVER(0.5)]);
+  await boot(page, url);
+  await setPoseCount(page, 3);
+  await loadLocal(page, out, 'canonRests');
+  await page.waitForTimeout(1500);
+  await openSongPanel(page);
+  const labels = await page.locator('#scorePartList .score-part-id').first().locator('option').allInnerTexts();
+  if (!labels.some((t) => t === '演奏者 1') || !labels.some((t) => /演奏者 2（未偵測到）/.test(t)) || !labels.some((t) => /演奏者 3（未偵測到）/.test(t))) throw new Error(`下拉沒有標出沒出現的 ID：${labels}`);
+  await assignPart(page, 0, '3');   // 先進場的大提琴給沒有人的 ID 3
+  await assignPart(page, 1, '1');
+  await closePanel(page);
+  await play(page);
+  await page.waitForTimeout(12000);
+  const v = await page.evaluate(() => window.__view());
+  const p1 = v.performers.find((p) => p.slot === 1), p3 = v.performers.find((p) => p.slot === 3);
+  if (!(p1.cursor > 3)) throw new Error(`在場的演奏者 1 沒有在演奏：${JSON.stringify(p1)}`);
+  if (p3.state !== 'substitute') throw new Error(`沒有人的 ID 3 應該由電腦代打：${p3.state}`);
+};

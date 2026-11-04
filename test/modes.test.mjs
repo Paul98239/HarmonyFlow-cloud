@@ -210,3 +210,25 @@ test('智能切換：還沒按過任何一下的人（一直不在、被代打�
   assert.equal(kb.mode, 'onset');
   assert.equal(kb.suggestion, null);
 });
+
+test('多按：同一刻按下好幾個鍵（10ms 內）每種模式都只算一下；在休止符上按被休止符鎖住、到點才放', () => {
+  for (const mode of ['musician', 'onset', 'beat']) {
+    const score = loadSong('duet');
+    const sim = createSim(score, partSlots(score, 0, 'kb'), { modes: { kb: mode } });
+    sim.advance(1000);
+    let released = 0;
+    for (const [i, key] of ['KeyF', 'KeyG', 'KeyH'].entries()) { if (i) sim.advance(sim.now + 5); if (sim.press('kb', { key }).released) released++; }
+    assert.equal(released, 1, mode);
+  }
+  // 休止符：canonRests 的小提琴第 14～18 拍休止
+  const score = loadSong('canonRests');
+  const sim = createSim(score, partSlots(score, 1, 'kb'));
+  sim.addBot(scoreBot('kb', { jitterMs: 5 }));
+  sim.advance(1000 + 14.5 * 600);   // 休止中
+  sim.bots = [];
+  const r = sim.press('kb', { key: 'KeyQ' });
+  assert.equal(r.released, false);
+  assert.equal(sim.ofType('press').at(-1).result, 'rest');
+  sim.advance(1000 + 18.2 * 600);
+  assert.ok(sim.ofType('release').some((e) => e.slot === 'kb' && Math.abs(score.midiTicksToSeconds(e.ticks) - 18 * 0.6) < 0.01), '合奏走到休止後的起音時放出');
+});

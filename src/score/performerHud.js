@@ -6,6 +6,7 @@ import { slotColor, slotName } from './palette.js';
 
 const REFRESH_MS = 200;
 const SWITCH_NOTE_MS = 5000;   // 自動切換之後，「已切換成…」的說明留這麼久
+const ABSENT_HINT_MS = 1500;   // 揮手的人不在鏡頭裡這麼久，就提示他面向鏡頭
 
 const STATE_TEXT = {
   waiting: '等待進場',
@@ -62,19 +63,22 @@ export function startPerformerHud({ getView, isActive, subscribeMode }) {
       seen.add(p.slot);
       const c = chipFor(p.slot);
       const modeText = p.setting === 'auto' ? `自動・${MODE_LABELS[p.mode]}` : MODE_LABELS[p.mode];
-      const stateText = p.state === 'behind' ? behindText(p.slot) : p.state === 'substitute' ? subText(p.slot) : STATE_TEXT[p.state] ?? '';
+      // 揮手的人不在鏡頭裡超過 ABSENT_HINT_MS：先請他面向鏡頭（MediaPipe 要看得到臉才找得到人）
+      const away = p.slot !== 'kb' && p.absentMs > ABSENT_HINT_MS && p.state !== 'done';
+      const stateText = away ? (p.state === 'substitute' ? '電腦代打中・請面向鏡頭' : '看不到你・請面向鏡頭')
+        : p.state === 'behind' ? behindText(p.slot) : p.state === 'substitute' ? subText(p.slot) : STATE_TEXT[p.state] ?? '';
       const sw = switched.get(p.slot);
       let tip = '';
       if (sw && sw.until > now) tip = sw.text;
       else if (p.suggestion && p.setting !== 'auto') tip = `建議改用「${MODE_LABELS[p.suggestion.mode]}」：${REASON_TEXT[p.suggestion.reason] ?? ''}`;
       else if (p.suggestion?.mode === 'musician') tip = `可以試試「音樂家」：${REASON_TEXT.steady}`;
-      const key = `${modeText}|${p.state}|${stateText}|${tip}|${p.isLeader}`;
+      const key = `${modeText}|${p.state}|${stateText}|${tip}|${p.isLeader}|${away}`;
       if (c.key !== key) {
         c.key = key;
         c.mode.textContent = modeText + (p.isLeader && performers.length > 1 ? '・帶頭' : '');
         c.state.textContent = stateText;
         c.tip.textContent = tip;
-        c.el.dataset.state = p.state;
+        c.el.dataset.state = away ? 'behind' : p.state;
       }
       if (root.children[performers.indexOf(p)] !== c.el) root.insertBefore(c.el, root.children[performers.indexOf(p)] ?? null);   // 跟樂譜的條同一個順序
     }

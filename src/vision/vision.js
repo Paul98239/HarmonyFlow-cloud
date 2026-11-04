@@ -855,11 +855,19 @@ function onCameraEnded(stream) {
 // 舞台中央提示（#stage-hint）的唯一擁有者：攝影機關閉（含中斷／開啟失敗）優先，其次是「還沒選現場人數」，兩者都不成立就藏起來。JS 只切 hidden＋寫 textContent（文字沒變不寫）。
 const HINT_CAMERA_OFF = "鏡頭已關閉";
 const HINT_CHOOSE_COUNT = "請在上方選擇現場人數後開始偵測";
+let attentionHint = "";   // 優先序最低的提示（main.js 依指派與在場名單給，例如「演奏者 2 請面向鏡頭」）：鏡頭開著、人數選了才顯示
+export function setAttentionHint(text) {
+  const t = text || "";
+  if (t === attentionHint) return;
+  attentionHint = t;
+  refreshStageHint();
+}
 function refreshStageHint() {
   if (!stageHint) return;
   let text = "";
   if (cameraState !== "on") text = cameraOffReason || HINT_CAMERA_OFF;
   else if (!chosenPoseCount) text = HINT_CHOOSE_COUNT;
+  else text = attentionHint;
   if (stageHint.textContent !== text) stageHint.textContent = text;
   stageHint.hidden = !text;
 }

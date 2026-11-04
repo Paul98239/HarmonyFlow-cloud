@@ -741,6 +741,7 @@ export class Scheduler {
           slot: p.slot, mode: p.mode, setting: p.modeSetting, suggestion: p.suggestion, status: p.status, state: this._stateOf(p),
           isLeader: p === E.leader, rate: p.tempo.playbackRate, cursor: p.cursor, next: { from, to, ticks: p.plan.driverTicks[from] ?? null }, credit: p.credit?.kind ?? null,
           intensity: p.intensity, expression: p.expression, expressionSource: p.expressionFromCamera ? 'camera' : 'press', gain: p.gain.value,
+          absentMs: p.absentSinceMs === null ? 0 : Math.max(0, this._clockMs - p.absentSinceMs),
         };
       }),
     };

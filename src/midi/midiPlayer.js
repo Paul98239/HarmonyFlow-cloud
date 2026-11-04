@@ -47,6 +47,7 @@ const LOADING_INDICATOR_DELAY_MS = 120; // 按播放後延遲這麼久才顯示 
  * @property {Map<string, number|string>} assignments 指派單位 id（part id，或單聲部多行譜時的 staff id）→ 演奏者槽位（1~4 或 KEYBOARD_SLOT）；改動時換新 Map
  * @property {Map<number|string, string>} modes  演奏者槽位 → 演奏模式設定（'auto'｜'musician'｜'onset'｜'beat'；見 modeAdvisor.js）；沒列的是 'auto'。是每位演奏者的設定，不是每個聲部
  * @property {number} playerCount        系統控制 bar 選的「現場人數」；0 ＝ 還沒選
+ * @property {number[]} presentSlots     這一刻鏡頭裡真的追蹤到的演奏者 ID（vision 的在場名單）；指派下拉把沒出現的 ID 標成「未偵測到」
  * @property {number} positionSeconds    目前播放位置（演奏：樂譜原始秒數，同 note.startSeconds 座標系；試聽：官方 currentTime）；
  *                                       頂端進度條唯讀顯示用，沒有任何 seek 路徑會寫它
  * @property {number} previewDuration    試聽中這首的長度（秒，官方 duration）；進度條在試聽時拿它當分母，不在試聽是 0
@@ -66,6 +67,7 @@ export const playerStore = new Store(/** @type {PlayerState} */ ({
   assignments: new Map(),
   modes: new Map(),
   playerCount: 0,
+  presentSlots: [],
   positionSeconds: 0,
   previewDuration: 0,
   library: { items: [], categories: [], query: '', category: '', status: 'idle', selectedId: '' },
@@ -148,6 +150,8 @@ export const isPerforming = () => { const s = playerStore.state; return s.mode =
 // 在場名單（main.js 把揮手監聽收到的 presentSlots 接到這裡）：排程器記下揮手的人從什麼時候開始不在鏡頭裡，帶頭的人不在場時不等寬限就換人（見 scheduler.js 的 setPresence()）。
 export function setPresentSlots(slots) {
   synth.scheduler.setPresence(slots, performance.now());
+  const prev = playerStore.state.presentSlots;
+  if (prev.length !== slots.length || prev.some((s, i) => s !== slots[i])) playerStore.set({ presentSlots: [...slots] });
 }
 
 // 表情（main.js 把 vision 送來的 expressionBySlot 接到這裡）：在場的人有攝影機表情，不在場的改回用按鍵力道推算（見 scheduler.js 的 setExpression()）
@@ -853,7 +857,15 @@ function renderSongPanel({ player }) {
     renderedPlayerCount = player.playerCount;
     scorePartList.replaceChildren(...assignmentUnits(player.parts).map((unit) => buildPartRow(unit, player.playerCount)));
   }
+  const present = new Set(player.presentSlots);
   for (const sel of scorePartList.querySelectorAll('.score-part-id')) {
+    // 鏡頭裡還沒出現的 ID 標成「未偵測到」（現場人數選得比在場的人多時，多出來的 ID 沒有人）：照樣可以先指派，人出現就能演奏
+    for (const opt of sel.options) {
+      const n = Number(opt.value);
+      if (!Number.isInteger(n) || n < 1) continue;
+      const label = present.has(n) ? `演奏者 ${n}` : `演奏者 ${n}（未偵測到）`;
+      if (opt.text !== label) opt.text = label;
+    }
     const assigned = player.assignments.get(sel.dataset.partId);   // 1~4、KEYBOARD_SLOT 或 undefined
     const value = assigned === undefined ? '' : String(assigned);
     if (sel.value !== value) sel.value = value;

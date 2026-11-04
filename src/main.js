@@ -2,7 +2,7 @@
 
 import * as midiPlayer from './midi/midiPlayer.js';
 import { initUi, setLoadingStatus, dismissLoading, showError } from './ui.js';
-import { startVision, setPoseCountListener, setPerformanceStateListener, warmPoseModel, visionLog, visionFrameStats, getCameraInfo, setFrameLogRecording, clearFrameLog, skeletonStats } from './vision/vision.js';
+import { startVision, setPoseCountListener, setPerformanceStateListener, warmPoseModel, visionLog, visionFrameStats, getCameraInfo, setFrameLogRecording, clearFrameLog, skeletonStats, setAttentionHint } from './vision/vision.js';
 import { startKeyboardTrigger, getInputDelays } from './input/keyboard.js';
 import { createGestureTrigger } from './input/gestureTrigger.js';
 import { summarizeMs } from './midi/tempo.js';
@@ -108,7 +108,21 @@ async function bootSystem() {
   // 觸發來源：鍵盤（槽位 'kb'）與揮手（槽位 1~4＝演奏者 ID）並存，都進同一個入口 triggerInput
   startKeyboardTrigger(midiPlayer.triggerInput, midiPlayer.KEYBOARD_SLOT, midiPlayer.liftInput);
   const onGesture = createGestureTrigger(midiPlayer.triggerInput);
-  setPerformanceStateListener((state) => { onGesture(state); midiPlayer.setPresentSlots(state.presentSlots); midiPlayer.setExpressions(state.expressionBySlot); });
+  const lastSeen = new Map();   // 演奏者 ID → 最後一次在鏡頭裡的時刻（面向鏡頭的提示用）
+  setPerformanceStateListener((state) => {
+    onGesture(state);
+    midiPlayer.setPresentSlots(state.presentSlots);
+    midiPlayer.setExpressions(state.expressionBySlot);
+    const now = performance.now();
+    for (const s of state.presentSlots) lastSeen.set(s, now);
+  });
+  // 指派了聲部、卻一直沒出現在鏡頭裡（或追丟了超過 2 秒）的演奏者：舞台中央請他面向鏡頭（MediaPipe 開始追蹤、追丟重找都要看得到臉）
+  setInterval(() => {
+    const { assignments, playerCount } = midiPlayer.playerStore.state;
+    const now = performance.now();
+    const missing = [...new Set([...assignments.values()])].filter((s) => typeof s === 'number' && s <= playerCount && !(now - (lastSeen.get(s) ?? -Infinity) < 2000)).sort();
+    setAttentionHint(missing.length ? `${missing.map((s) => `演奏者 ${s}`).join('、')} 還沒出現在鏡頭裡：請面向鏡頭，讓鏡頭看得到你的臉` : '');
+  }, 500);
 
   startPerformerHud({ getView: midiPlayer.performerView, isActive: midiPlayer.isPerforming, subscribeMode: (fn) => midiPlayer.onPerformanceEvent('mode', fn) });
   startScoreView({ getView: midiPlayer.performerView, getStatic: midiPlayer.scoreStatic, isActive: midiPlayer.isPerforming });

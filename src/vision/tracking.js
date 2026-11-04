@@ -65,7 +65,26 @@ export const DEFAULT_TRACKING_CONFIG = Object.freeze({
   minShoulderWidth: 0.015,
   maxShoulderWidth: 0.9,
   visibilityThreshold: 0.5,
+
+  // 鎖定新 ID（開始追蹤、追丟之後重找）要看得到臉：鼻子與至少一隻眼睛的可見度到這麼多。MediaPipe 的偵測器本身就是先找臉，
+  // 背對、低頭、臉被擋的人本來就鎖不穩；不看得到臉就鎖，容易把背景或別人的半個身體鎖成新 ID。已經在追蹤的人轉頭不受影響。
+  faceVisibilityMin: 0.5,
+  // 追丟的人回來時，給他原本的 ID：記住釋放的槽位最後的位置這麼久，新面孔鎖定時優先給離他最近、而且空著的那個舊槽位（距離在 reacquireRatio 個尺度內）
+  reacquireMemoryMs: 30000,
+  reacquireRatio: 3,
+  // 手臂的解剖學上限（尺度單位，尺度≈肩寬）：上臂（肩→肘）、前臂（肘→腕）、肩到手腕。超過的那一段當成這一幀不可信（MediaPipe 兩人靠近時常把別人的手接到這個人身上），
+  // 位置維持上一幀、可見度當成 0。真人的上臂約 0.9、前臂約 0.8 個肩寬，留很寬的餘地（往鏡頭伸的手只會變短）
+  maxUpperArmRatio: 1.6,
+  maxForearmRatio: 1.5,
+  maxReachRatio: 2.6,
+  // 兩個人的同一類手部節點（手腕、手掌）落在這麼近（較小尺度的倍數）以內：同一隻手被兩組骨架共用，只留給解剖上比較合理的那個人
+  sharedHandRatio: 0.3,
+  sharedHandReachRatio: 1.8,
 });
+
+// 手臂鏈：[肩, 肘, 腕, 手掌三點]，左右各一
+const ARM_CHAINS = [[11, 13, 15, [17, 19, 21]], [12, 14, 16, [18, 20, 22]]];
+const HAND_JOINTS = [15, 16, 17, 18, 19, 20, 21, 22];
 
 function isFinitePoint(p) { return !!p && Number.isFinite(p.x) && Number.isFinite(p.y); }
 
@@ -113,7 +132,10 @@ export function buildDetection(landmarks, { cfg = DEFAULT_TRACKING_CONFIG, world
   const shoulderVis = shoulderVisibility(landmarks);
   const meanVisibility = meanLandmarkVisibility(landmarks);
   if (shoulderVis < cfg.coreVisibilityMinTracked || meanVisibility < cfg.overallVisibilityMinTracked) return null;
-  const strictPlausible = shoulderVis >= cfg.coreVisibilityMin && meanVisibility >= cfg.overallVisibilityMin;
+  const faceVis = Math.min(landmarks[0]?.visibility ?? 0, Math.max(landmarks[2]?.visibility ?? 0, landmarks[5]?.visibility ?? 0));
+  const faceVisible = faceVis >= cfg.faceVisibilityMin;
+  // 鎖定新 ID 還要看得到臉（faceVisibilityMin）；延續已經在追蹤的人不需要
+  const strictPlausible = shoulderVis >= cfg.coreVisibilityMin && meanVisibility >= cfg.overallVisibilityMin && faceVisible;
 
   const shoulderMidX = (lShoulder.x + rShoulder.x) / 2;
   const shoulderMidY = (lShoulder.y + rShoulder.y) / 2;
@@ -126,7 +148,20 @@ export function buildDetection(landmarks, { cfg = DEFAULT_TRACKING_CONFIG, world
 
   // meanVisibility 給 dedupeDetections 在沒有既有 track 可對照時挑「比較可信的那一筆」用。
   // world＝同一筆偵測的 worldLandmarks（公尺、原點在兩髖中間），只給逐幀紀錄用
-  return { landmarks, world, centroid, scale, aspect, meanVisibility, strictPlausible };
+  return { landmarks, world, centroid, scale, aspect, meanVisibility, strictPlausible, faceVisible };
+}
+
+// 這筆偵測裡解剖上不可能的手臂節點（尺度 scale 用 track 的平滑尺度）：上臂、前臂、肩到手腕超過上限的那一段之後的節點都不可信。回傳節點序號的 Set
+export function implausibleArmJoints(landmarks, scale, aspect, cfg = DEFAULT_TRACKING_CONFIG) {
+  const bad = new Set();
+  const d = (a, b) => Math.hypot(a.x - b.x, (a.y - b.y) * aspect) / Math.max(1e-3, scale);
+  for (const [sh, el, wr, hand] of ARM_CHAINS) {
+    const S = landmarks[sh], E = landmarks[el], Wr = landmarks[wr];
+    if (!isFinitePoint(S) || !isFinitePoint(E) || !isFinitePoint(Wr)) continue;
+    if (d(S, E) > cfg.maxUpperArmRatio) { bad.add(el); bad.add(wr); hand.forEach((h) => bad.add(h)); continue; }
+    if (d(E, Wr) > cfg.maxForearmRatio || d(S, Wr) > cfg.maxReachRatio) { bad.add(wr); hand.forEach((h) => bad.add(h)); }
+  }
+  return bad;
 }
 
 // 兩筆偵測／兩個 track／候選人的肩膀中點距離（y 乘 aspect，跟尺度同一把尺）。三種物件都有 centroid、scale、aspect 欄位，
@@ -283,6 +318,7 @@ export class PersonTracker {
   reset() {
     this.tracks = new Array(this.cfg.maxUsers).fill(null);
     this.pending = []; // 候選新目標，尚未持續出現足夠時間
+    this.lost = [];    // 最近被釋放（追丟）的槽位最後的位置 { slot, centroid, scale, aspect, atMs }：同一個人回來時給他原本的 ID
     this.events = [];  // 鎖定／釋放的紀錄（開發用）：vision.js 每幀 drainEvents() 取走，給 __visionLog 匯出，查「多出來的 ID 是怎麼被鎖進去的」
   }
 
@@ -350,10 +386,23 @@ export class PersonTracker {
     return posDist / gate;
   }
 
-  // 幫剛確認鎖定的新候選人挑槽位：ID 只是顯示提示，不做身分認回，直接給任一個空槽位
-  _resolveSlotForNewIdentity() {
-    const freeSlot = this.tracks.findIndex((t) => t === null);
-    return freeSlot;
+  // 幫剛確認鎖定的新候選人挑槽位：先看最近追丟的人（reacquireMemoryMs 內）裡，槽位還空著、最後的位置離他最近（reacquireRatio 個尺度內）的那個——
+  // 同一個人走出去再回來拿回原本的 ID，兩個人一起離開、換了順序回來也不會互換；都不是就給第一個空槽位（ID 只是位置提示，不做外觀上的身分辨識）
+  _resolveSlotForNewIdentity(det, nowMs) {
+    this.lost = this.lost.filter((l) => nowMs - l.atMs <= this.cfg.reacquireMemoryMs && this.tracks[l.slot] === null);
+    let best = null, bd = Infinity;
+    for (const l of this.lost) {
+      const dist = centroidDistance(l, det) / Math.max(1e-3, Math.min(l.scale, det.scale));
+      if (dist < bd) { bd = dist; best = l; }
+    }
+    if (best && bd <= this.cfg.reacquireRatio) {
+      // 其他空槽位的舊主人如果更近，不搶他的：只有在這個人是「離這個舊位置最近的候選」時才給（由呼叫端依尺度大小排的順序逐一處理，近似即可）
+      this.lost = this.lost.filter((l) => l !== best);
+      return best.slot;
+    }
+    const remembered = new Set(this.lost.map((l) => l.slot));
+    const fresh = this.tracks.findIndex((t, i) => t === null && !remembered.has(i));
+    return fresh !== -1 ? fresh : this.tracks.findIndex((t) => t === null);
   }
 
   _createTrack(slot, det, nowMs) {
@@ -381,7 +430,8 @@ export class PersonTracker {
     return track;
   }
 
-  _updateTrack(track, det, nowMs) {
+  // hidden：這一幀不可信的節點（解剖上不可能、跟別人共用的手）：位置維持上一幀（不進平滑）、可見度當成 0
+  _updateTrack(track, det, nowMs, hidden = null) {
     const { visibilityEmaAlpha, visibilityOnGate, visibilityOffGate,
             scaleEmaAlpha } = this.cfg;
     track.missCount = 0;
@@ -401,11 +451,14 @@ export class PersonTracker {
     // 上一幀的結果當作可見度 EMA 與遲滯的狀態來源（第一幀 prev 是 _createTrack 複製的原始 landmarks，沒有 visible 欄位，退回用 onGate 判定初始狀態）
     const prev = track.smoothed, lowPass = track.visLowPass;
     track.smoothed = det.landmarks.map((p, i) => {
-      let rawVis = p.visibility ?? 1;
+      const untrusted = hidden?.has(i) && prev[i] && Number.isFinite(prev[i].x);
+      let rawVis = untrusted ? 0 : p.visibility ?? 1;
       if (lowPass) rawVis = lowPass[i] += (rawVis - lowPass[i]) * MEDIAPIPE_VISIBILITY_ALPHA;
       const prevVis = prev[i]?.visibility ?? rawVis;
       const visibility = prevVis + (rawVis - prevVis) * visibilityEmaAlpha;
       const wasVisible = prev[i]?.visible ?? (visibility >= visibilityOnGate);
+      // 不可信的節點這一幀直接隱藏（不等可見度慢慢掉），位置停在上一幀
+      if (untrusted) return { x: prev[i].x, y: prev[i].y, visibility, visible: false };
       const { x, y } = chain(track.filters[i], { x: p.x, y: p.y });
       return {
         x,
@@ -415,6 +468,30 @@ export class PersonTracker {
         visible: wasVisible ? visibility > visibilityOffGate : visibility >= visibilityOnGate
       };
     });
+  }
+
+  // 兩個人的手部節點（手腕、手掌）幾乎重合：可能是同一隻手被兩組骨架共用（MediaPipe 兩人靠近、手臂交叉時常見），也可能真的碰在一起。
+  // 只有對其中一個人是伸到極限（肩到這個點超過 sharedHandReachRatio 個尺度）而對另一個人比較近時，才判定是被借走的手，那個人這一幀把它當成不可信。
+  _resolveSharedHands(pairs) {
+    const { sharedHandRatio } = this.cfg;
+    for (let i = 0; i < pairs.length; i++) {
+      for (let k = i + 1; k < pairs.length; k++) {
+        const A = pairs[i], B = pairs[k], la = A.det.landmarks, lb = B.det.landmarks, aspect = A.det.aspect;
+        const lim = sharedHandRatio * Math.min(A.track.scale, B.track.scale);
+        for (const ja of HAND_JOINTS) {
+          if (A.hidden.has(ja) || !isFinitePoint(la[ja])) continue;
+          for (const jb of HAND_JOINTS) {
+            if (B.hidden.has(jb) || !isFinitePoint(lb[jb])) continue;
+            if (Math.hypot(la[ja].x - lb[jb].x, (la[ja].y - lb[jb].y) * aspect) >= lim) continue;
+            const reach = (lm, j, sc) => { const sh = lm[j % 2 ? 11 : 12]; return Math.hypot(lm[j].x - sh.x, (lm[j].y - sh.y) * aspect) / Math.max(1e-3, sc); };
+            // 兩個人的手本來就可能碰在一起（擊掌）：只有對其中一個人是伸到極限（> sharedHandReachRatio）、對另一個人比較近時，才判定是被借走的手
+            const ra = reach(la, ja, A.track.scale), rb = reach(lb, jb, B.track.scale), lim2 = this.cfg.sharedHandReachRatio;
+            if (ra > lim2 && rb < ra) A.hidden.add(ja);
+            else if (rb > lim2 && ra < rb) B.hidden.add(jb);
+          }
+        }
+      }
+    }
   }
 
   // 候選新目標需持續出現足夠時間才可鎖定空位，避免路人短暫入鏡搶走槽位。
@@ -482,7 +559,7 @@ export class PersonTracker {
     ready.sort((a, b) => b.det.scale - a.det.scale);
 
     for (const p of ready) {
-      const slot = this._resolveSlotForNewIdentity();
+      const slot = this._resolveSlotForNewIdentity(p.det, nowMs);
       if (slot === -1) continue; // 這幀空槽位已被更靠近鏡頭的候選人用完，留著下一幀再排隊
       this.tracks[slot] = this._createTrack(slot, p.det, nowMs);
       this._logEvent(nowMs, 'lock', slot, { scale: round3(p.det.scale), vis: round3(p.det.meanVisibility), strict: p.det.strictPlausible });
@@ -535,18 +612,24 @@ export class PersonTracker {
     });
     candidates.sort((a, b) => (a.yields - b.yields) || (a.cost - b.cost));
 
+    const pairs = [];
     for (const { slot, di } of candidates) {
       if (usedSlot.has(slot) || usedDetIdx.has(di)) continue;
       usedSlot.add(slot);
       usedDetIdx.add(di);
-      this._updateTrack(this.tracks[slot], detections[di], nowMs);
+      pairs.push({ track: this.tracks[slot], det: detections[di] });
     }
+    // 不可信的手臂節點：解剖上不可能的，加上兩個人共用的同一隻手（只留給比較合理的那一個）
+    for (const pr of pairs) pr.hidden = implausibleArmJoints(pr.det.landmarks, pr.track.scale, pr.det.aspect, this.cfg);
+    this._resolveSharedHands(pairs);
+    for (const pr of pairs) this._updateTrack(pr.track, pr.det, nowMs, pr.hidden);
 
     this.tracks.forEach((track, slot) => {
       if (!track || usedSlot.has(slot)) return;
       track.missCount++; // missCount === 0 是「這一幀真的有人」的判準（見 getActiveTracks）
       if (nowMs - track.lastSeenMs > this.cfg.trackLossMs) {
         this.tracks[slot] = null;
+        this.lost.push({ slot, centroid: { ...track.centroid }, scale: track.scale, aspect: track.aspect, atMs: nowMs });
         this._logEvent(nowMs, 'loss', slot);
       }
     });
