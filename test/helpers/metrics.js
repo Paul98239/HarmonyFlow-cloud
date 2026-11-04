@@ -8,7 +8,7 @@ export function delayedTriggers(sim) {
 }
 
 /**
- * 伴奏擠成一團：依起音 tick 排序的伴奏音（追音、跳過的不算），相鄰兩個不同起音的「真實間隔 ÷ 樂譜間隔」小於 minRatio（＝比檔案快 1/minRatio 倍以上），
+ * 伴奏擠成一團：依起音 tick 排序的伴奏音（追音、跳過的不算），連續三個不同起音、兩兩的「真實間隔 ÷ 樂譜間隔」都小於 minRatio（＝比檔案快 1/minRatio 倍以上），
  * 而且樂譜間隔至少 minScoreGapSec（和弦錯位、裝飾音本來就擠）。回傳違規清單。
  */
 export function bunching(sim, { minRatio = 0.2, minScoreGapSec = 0.05 } = {}) {
@@ -25,13 +25,19 @@ export function bunching(sim, { minRatio = 0.2, minScoreGapSec = 0.05 } = {}) {
   // 換帶頭的人時合奏跳到新帶頭者的位置（垂直切片：中間的音追音或跳過）是規則本身，跳點前後兩個音靠得近不算擠成一團
   const jumps = sim.ofType('leader').map((e) => e.clockMs);
   const nearJump = (ms) => jumps.some((j) => ms >= j - 1 && ms - j < 60);
-  const bad = [];
-  for (let i = 1; i < ticks.length; i++) {
-    if (nearJump(byTick.get(ticks[i]))) continue;
+  // 「擠成一團」＝連續三個以上不同的起音被壓在一起（兩兩之間都比樂譜快 1/minRatio 倍以上）。只有兩個音靠在一起的是 lookahead 的極限：
+  // 帶頭的人提早按時，已經帶時間戳送出（最多 LOOKAHEAD_MS 之前）的那一顆取消不了，會緊跟在新一拍的音後面響（見 docs/DECISIONS.md），不算
+  const squeezed = (i) => {
     const ds = sim.score.midiTicksToSeconds(ticks[i]) - sim.score.midiTicksToSeconds(ticks[i - 1]);
-    if (ds < minScoreGapSec) continue;
+    if (ds < minScoreGapSec) return null;
     const dr = (byTick.get(ticks[i]) - byTick.get(ticks[i - 1])) / 1000;
-    if (dr / ds < minRatio) bad.push({ tick: ticks[i], scoreGap: ds, realGap: dr });
+    return dr / ds < minRatio ? { tick: ticks[i], scoreGap: ds, realGap: dr } : null;
+  };
+  const bad = [];
+  for (let i = 2; i < ticks.length; i++) {
+    if (nearJump(byTick.get(ticks[i])) || nearJump(byTick.get(ticks[i - 1]))) continue;
+    const a = squeezed(i - 1), b = squeezed(i);
+    if (a && b) bad.push(b);
   }
   return bad;
 }

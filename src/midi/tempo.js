@@ -26,6 +26,11 @@ export const maxGroupSpanSec = (source) => MAX_GROUP_SPAN_S[source] ?? Infinity;
 // 再取「你上一次的按鍵間隔」較小者，加速時窗口跟著縮小。這個間隔要算所有按鍵嘗試（含被忽略的）：
 // 只算被接受的話，一開始就比檔案快的人每隔一下的按鍵會一直被擋，速度學不起來。
 export const DEBOUNCE_FRACTION = 0.6;
+// 去抖的方式（TempoFollower.debounce，依演奏模式）：
+//  · 'adaptive'（起音模式，原本的行為）：窗口＝預估這一步的 60% 與上一次按鍵間隔取小，加速時跟著縮。
+//  · 'min'（音樂家模式）：固定 DEBOUNCE_MIN_MS——他按的每一下都算（裝飾、搶拍是他的表現），只擋同一下的機械彈跳。
+//  · 'fixed'（拍子模式）：窗口只看預估這一步（一拍），不跟著按鍵間隔縮：亂按、連按不會把速度越推越快。
+export const MUSICIAN_WINDOW_INTERVALS = 3;   // 音樂家模式的估速視窗：最近 3 個間隔（速度跟手；手抖由他自己負責）
 export const DEBOUNCE_MIN_MS = 50;
 export const DEBOUNCE_MAX_MS = 500;
 
@@ -52,11 +57,12 @@ export function rateBoundsFor(gapSecs) {
  *        ms＝按下時刻（排程器時鐘，不含暫停）
  * @param {number} fallback  不足 2 個按鍵（沒有間隔可估）時回傳的值，通常是目前的 playbackRate
  * @param {{ lo: number, hi: number }} [bounds]  這首歌的速度區間（rateBoundsFor），預設是絕對保險範圍
+ * @param {number} [windowIntervals]  估速視窗（間隔數）：起音／拍子模式 RATE_WINDOW_INTERVALS；音樂家模式用小視窗（MUSICIAN_WINDOW_INTERVALS），速度跟著他的 rubato 走
  */
-export function estimatePlaybackRate(history, fallback = 1, bounds = { lo: MIN_PLAYBACK_RATE, hi: MAX_PLAYBACK_RATE }) {
+export function estimatePlaybackRate(history, fallback = 1, bounds = { lo: MIN_PLAYBACK_RATE, hi: MAX_PLAYBACK_RATE }, windowIntervals = RATE_WINDOW_INTERVALS) {
   if (history.length < 2) return fallback;
   const last = history[history.length - 1];
-  const first = history[Math.max(0, history.length - 1 - RATE_WINDOW_INTERVALS)];
+  const first = history[Math.max(0, history.length - 1 - windowIntervals)];
   const realSec = Math.max(1e-3, (last.ms - first.ms) / 1000); // 同一毫秒連按時避免除以 0
   return clamp((last.scoreSec - first.scoreSec) / realSec, bounds.lo, bounds.hi);
 }
@@ -106,6 +112,14 @@ export class TempoFollower {
     this._lastAttemptClock = null;    // 上一次按鍵嘗試（含被忽略的）的時鐘
     this._lastAttemptIntervalMs = Infinity; // 前兩次按鍵嘗試之間的間隔（去抖窗口用）
     this._surprise = null;     // 驚訝的那一下 { x: 隱含速度, press: { scoreSec, ms } }，等下一下確認是變速還是停手
+    this.debounce = 'adaptive';  // 去抖的方式（見 DEBOUNCE_FRACTION 下的說明），依演奏模式
+    this.window = RATE_WINDOW_INTERVALS;   // 估速視窗（間隔數），依演奏模式
+  }
+
+  /** 依演奏模式設定去抖方式與估速視窗（不清歷史、不動速度） */
+  configure({ debounce = 'adaptive', window = RATE_WINDOW_INTERVALS } = {}) {
+    this.debounce = debounce;
+    this.window = window;
   }
 
   get bounds() { return this._rateBounds; }
@@ -126,10 +140,13 @@ export class TempoFollower {
 
   // 去抖：窗口依這一步預估的真實長度（expectedMs，沒有上一個起音時不會用到）與你上一次的按鍵間隔；被忽略的也算一次按鍵嘗試（理由見 DEBOUNCE 常數）。
   // 第一次有效按鍵沒有前一個可比，不去抖。回傳這一下要不要擋掉。
-  attempt(clock, expectedMs) {
+  // floorMs：窗口的下限（拍子模式＝這一步在速度上限下的長度，見 scheduler.js：每一下都放一整拍，窗口不夠大的話亂按會比速度上限還快）
+  attempt(clock, expectedMs, floorMs = 0) {
     let blocked = false;
     if (this._lastAcceptClock != null) {
-      blocked = clock - this._lastAcceptClock < debounceWindowMs(expectedMs, this._lastAttemptIntervalMs);
+      const win = this.debounce === 'min' ? DEBOUNCE_MIN_MS
+        : this.debounce === 'fixed' ? Math.max(debounceWindowMs(expectedMs), floorMs) : debounceWindowMs(expectedMs, this._lastAttemptIntervalMs);
+      blocked = clock - this._lastAcceptClock < win;
     }
     if (this._lastAttemptClock != null) this._lastAttemptIntervalMs = clock - this._lastAttemptClock;
     this._lastAttemptClock = clock;
@@ -162,7 +179,7 @@ export class TempoFollower {
       if (this._surprise) { this._history = [this._surprise.press]; this._surprise = null; }   // 上一下是停手／失誤：歷史從那一下重新開始
       this._history.push(press);
     }
-    this.playbackRate = estimatePlaybackRate(this._history, this.playbackRate, B);
+    this.playbackRate = estimatePlaybackRate(this._history, this.playbackRate, B, this.window);
   }
 
   // 播放中改指派：去抖與估速歷史清掉（舊的間隔對不上新的 driver 序列），速度估計保留。

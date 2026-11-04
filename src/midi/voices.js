@@ -401,8 +401,9 @@ export class VoiceLedger {
   // 讓一顆音發聲：noteOn，記進正在響的佇列（同音高先進先出）。dueMs＝預定發聲的時鐘時刻（你的音就是按下的那一刻），只有 tick() 裡的電腦音（lookahead）與被併入組裡的你的音（timed）才帶時間戳；
   // onTime 記下那顆 noteOn 的 AudioContext 時間（沒帶＝undefined）。holdScope／holdTicks／holdFrom＝這顆音的 hold 歸誰、等哪一串起音、從哪個游標起算；
   // rate＝目前速度、fromTick＝由 tick() 放出（遲到統計只算這種，見 scheduler.js）、clockMs＝排程器時鐘、timed＝你的合成器也照 lookahead 帶時間戳（近距起音分組被併入的音）。
+  // velocity＝實際送出的力度（排程器依代打、按法、情緒算好；沒給就是原檔的力度）。
   // keyup 模式（mode 不是 null，見 scheduler.js 的 keyupOf()）：你的音不做 hold；mode.key 有值的音（組頭）不排收音（Infinity），等這個鍵放開（releaseKey），mode.key 是 null 的照 offMs 收。
-  sound(staff, note, offMs, dueMs, { holdScope, holdTicks, holdFrom, rate, fromTick, clockMs, timed = false, mode = null }) {
+  sound(staff, note, offMs, dueMs, { holdScope, holdTicks, holdFrom, rate, fromTick, clockMs, timed = false, mode = null, velocity = note.velocity }) {
     const opts = timed ? this._router.stampTime(dueMs) : this._router.stamp(staff, dueMs);
     this._capOverlaps(staff, note, dueMs, rate, clockMs, opts?.time);
     let queue = staff.sounding.get(note.midiNote);
@@ -415,9 +416,9 @@ export class VoiceLedger {
       endTick: note.endTick, offMs: hold || waitKey !== null ? Infinity : offMs, holdTick: hold ? hold.tick : null, holdScope: hold ? holdScope : null,
       tailSec: hold ? hold.tailSec : 0, waitKey, note, onTime: opts?.time, capped: false,
     }); // 先登記再 noteOn：合成器收到 noteOn 時，佇列最後一項就是這顆音
-    this._router.noteOn(staff, note.midiNote, note.velocity, opts);
+    this._router.noteOn(staff, note.midiNote, velocity, opts);
     this._events.queue('noteOn', {
-      note, noteId: note.id ?? null, staffId: staff.id, kind: staff.kind, dueMs, clockMs,
+      note, noteId: note.id ?? null, staffId: staff.id, kind: staff.kind, dueMs, clockMs, velocity,
       timed: opts !== undefined, fromTick, lateMs: Math.max(0, clockMs - dueMs),
     });
   }

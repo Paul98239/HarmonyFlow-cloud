@@ -3,8 +3,10 @@
 
 import { Scheduler } from '../../src/midi/scheduler.js';
 import { rng } from './songs.js';
+import { beatLines as beatLinesOf } from '../../src/midi/beats.js';
 
 export const TICK_MS = 12;
+const lagOf = (slot) => (slot === 'kb' ? 2 : 110);
 
 /** 假合成器：記下每一次呼叫（排程器時鐘 at、AudioContext 時間戳 time、是不是在 trigger() 呼叫裡） */
 export class FakeSynth {
@@ -63,7 +65,8 @@ export class Sim {
       // 機器人的按鍵落在 tick 之間：先推到按鍵時刻再按（trigger 用自己的 receivedMs）
       for (;;) {
         let due = null;
-        for (const b of this.bots) { const t = b.nextAt(this); if (t !== null && t <= next && (due === null || t < due.t)) due = { t, b }; }
+        // 機器人的時刻是他的動作時刻；程式收到的時刻晚 lag（揮手要等手回升才確認，約 110ms；鍵盤 2ms），motionLagMs 預設值就是這個差
+        for (const b of this.bots) { const t0 = b.nextAt(this); const t = t0 === null ? null : Math.max(this.now, t0 + (b.lagMs ?? lagOf(b.slot))); if (t !== null && t <= next && (due === null || t < due.t)) due = { t, b }; }
         if (!due) break;
         this.now = Math.max(this.now, due.t);
         due.b.fire(this);
@@ -141,7 +144,7 @@ export function scoreBot(slot, opts = {}) {
       if (idx === null || idx >= g.segments.length) return null;
       if (planned && planned.index === idx) return planned.at;
       // 代打中游標是電腦推的：他照自己的拍子按下去（可能剛好在電腦替他放之後一點點＝接手），不因游標被推走就一直往後重排
-      if (planned && g.status === 'substitute' && planned.at >= sim.now - 1) return planned.at;
+      if (planned && g.status === 'substitute' && planned.at + 200 >= sim.now) return planned.at;   // 200：動作到程式收到之間的延遲（揮手 110ms）還沒過
       // 上一下按了卻沒有往前（被去抖擋、被鎖成預按）：同一個起音隔 retryMs 再試，跟真人一樣不會在同一毫秒狂按
       if (lastFired && lastFired.index === idx) { planned = { index: idx, at: lastFired.at + retryMs }; return planned.at; }
       const ref = delayed === idx && g.segments[idx + 1] ? idx + 1 : idx;
@@ -156,7 +159,7 @@ export function scoreBot(slot, opts = {}) {
       let at = base.ms + ((sec - base.sec) * 1000) / factor + (r() * 2 - 1) * jitterMs;
       if (stopAtMs !== null && at >= stopAtMs && (resumeAtMs === null || at < resumeAtMs)) at = resumeAtMs ?? Infinity;
       if (at === Infinity) return null;
-      planned = { index: idx, at: Math.max(at, sim.now) };
+      planned = { index: idx, at };
       return planned.at;
     },
     fire(sim) {
@@ -201,4 +204,71 @@ export function mashBot(slot, { fromMs, toMs, periodMs = 90, jitter = 0.5, sourc
 /** 指派表：單位 id（依 parts 順序）→ 槽位 */
 export function assign(score, slots) {
   return score.parts.map((p, i) => [p.id, slots[i]]).filter(([, s]) => s !== undefined && s !== null);
+}
+
+/**
+ * 跟著拍子揮的人（不懂音樂、不看音符）：從他第一個音所在的那一拍起，每一條拍線（beats.js）都按一下，速度倍率 factor、手抖 jitterMs。
+ * 不看排程器的狀態（開迴路）：他只是跟著拍子。
+ */
+export function beatBot(slot, { factor = 1, jitterMs = 0, seed = 21, source = slot === 'kb' ? 'keyboard' : 'gesture', fromLine = null } = {}) {
+  const r = rng(seed);
+  let times = null, i = 0, lastKey = null, extra = 0;
+  return {
+    slot, presses: 0,
+    _init(sim) {
+      const { lines } = beatLinesOf(sim.score);
+      const g = sim.sched.inspect().groups.find((x) => x.slot === slot);
+      const first = g.segments[0]?.ticks ?? 0;
+      let k = fromLine ?? Math.max(0, lines.findIndex((t, n) => t <= first && (lines[n + 1] ?? Infinity) > first));
+      times = lines.slice(k).map((t) => sim.startMs + (sim.score.midiTicksToSeconds(t) * 1000) / factor + (r() * 2 - 1) * jitterMs);
+    },
+    nextAt(sim) {
+      if (!times) this._init(sim);
+      // 拍線用完了但還沒奏完（中間有一下被擋、慢了一拍）：真人會照同樣的拍子繼續揮到音樂結束，最多多揮 8 下
+      if (i >= times.length && times.length >= 2 && extra < 8 && !sim.sched.isFinished()) {
+        const g = sim.sched.inspect().groups.find((x) => x.slot === slot);
+        if (g.groupEnd < g.segments.length || g.credit) { times.push(times.at(-1) + (times.at(-1) - times.at(-2))); extra++; }
+      }
+      return i < times.length ? times[i] : null;
+    },
+    idle(sim) { if (lastKey && i >= times.length) { sim.lift(slot, lastKey); lastKey = null; } },
+    fire(sim) {
+      i++;
+      const key = source === 'keyboard' ? ['KeyF', 'KeyJ'][this.presses % 2] : undefined;
+      if (lastKey) sim.lift(slot, lastKey);
+      sim.press(slot, { source, key });
+      lastKey = key ?? null;
+      this.presses++;
+    },
+  };
+}
+
+/** 照著自己聲部每個音按的人（開迴路，照樂譜時刻 ÷ factor），相鄰太近（< minGapMs）的音只按第一個 */
+export function onsetBot(slot, { factor = 1, jitterMs = 0, seed = 31, minGapMs = 150, source = slot === 'kb' ? 'keyboard' : 'gesture' } = {}) {
+  const r = rng(seed);
+  let times = null, i = 0, lastKey = null;
+  return {
+    slot, presses: 0,
+    nextAt(sim) {
+      if (!times) {
+        const g = sim.sched.inspect().groups.find((x) => x.slot === slot);
+        times = [];
+        for (const s of g.segments) {
+          const t = sim.startMs + (sim.score.midiTicksToSeconds(s.ticks) * 1000) / factor;
+          if (!times.length || t - times.at(-1) >= minGapMs) times.push(t);
+        }
+        times = times.map((t) => t + (r() * 2 - 1) * jitterMs);
+      }
+      return i < times.length ? times[i] : null;
+    },
+    idle(sim) { if (lastKey && i >= times.length) { sim.lift(slot, lastKey); lastKey = null; } },
+    fire(sim) {
+      i++;
+      const key = source === 'keyboard' ? ['KeyF', 'KeyJ'][this.presses % 2] : undefined;
+      if (lastKey) sim.lift(slot, lastKey);
+      sim.press(slot, { source, key });
+      lastKey = key ?? null;
+      this.presses++;
+    },
+  };
 }

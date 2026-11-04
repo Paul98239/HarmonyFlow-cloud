@@ -8,7 +8,8 @@
 // 預報入口 setForecaster()：每個 tick 問預報器「你會在什麼時刻按下一個起音」，收到有效預報就段中換錨、重排還沒送出的電腦音（_applyForecast）；預設沒有預報器，行為完全不變（N2）。
 // 所有合成器呼叫都經過 voices.js。
 
-import { summarizeMs, TempoFollower, minPressIntervalSec, maxGroupSpanSec } from './tempo.js';
+import { summarizeMs, TempoFollower, minPressIntervalSec, maxGroupSpanSec, MUSICIAN_WINDOW_INTERVALS } from './tempo.js';
+import { ModeAdvisor, MODES } from './modeAdvisor.js';
 import { OutputRouter, portsFor, VoiceLedger, scaledMs, EPS_MS } from './voices.js';
 import { buildPlan, staffPools, sliceOfTick, switchesKit, stateEvents, emptyPerformerPlan, slotOrder } from './performancePlan.js';
 import { ChannelStateTracker, chaseEventsAt, DRUM_CHANNEL } from './midiParser.js';
@@ -204,11 +205,37 @@ export function portsNeeded(score, assignments) {
   })));
 }
 
+// 演奏模式（每位演奏者各自一個，見 modeAdvisor.js）：
+//  · 'onset'（起音，原本的行為）：一下放行他的下一個起音；按不及的近距起音併成一組（_groupEnd）。
+//  · 'musician'（音樂家）：分組同起音（只併真的按不及的），但他按的每一下都算（去抖只擋 50ms 內的機械彈跳）、估速視窗短（速度跟著他的 rubato 走）、
+//    揮手超前不鎖（他可以帶到前面）；力度完全由他的按法決定（階段 2）。
+//  · 'beat'（拍子）：一下帶一拍（beats.js 的單位：同一拍裡他的所有起音，頭一定是他自己的起音），拍內的音照樂譜依他的速度由電腦補上；不揮，這一拍就不會開始。
+//    去抖窗口只看一拍、不跟著連按縮小，速度上限 BEAT_MODE_MAX_RATE：亂按也不會越推越快。
+// 應用層數字（不是規格）：
+const BEAT_MODE_MAX_RATE = 1.6;   // 拍子模式的速度上限（檔案速度的倍數）
+const BEAT_GROUP_MAX_SEC = 1.6;
+const BEAT_HOLD_AHEAD = 0.6;
+const BEAT_DEBOUNCE_FLOOR = 0.9;  // 拍子模式：兩下之間至少隔「這一拍在速度上限下的長度」的這麼多（亂按最快也只到速度上限）      // 拍子模式：離下一拍的頭還超過這麼多拍的一下算「打拍子」（見 _triggerBody）   // 拍子模式：太快的拍合併時，一組最多跨這麼久（真實秒）
+// 電腦代打（第二段防呆）時他的聲部的力度倍率：小聲介入，維持合奏感但聽得出不是他在彈
+export const SUBSTITUTE_VELOCITY = 0.6;
+
+// 依他的模式設定速度追蹤（去抖方式、估速視窗、速度區間）
+function applyMode(p) {
+  const m = p.mode, b = p.plan.rateBounds;
+  p.tempo.configure(m === 'musician' ? { debounce: 'min', window: MUSICIAN_WINDOW_INTERVALS } : m === 'beat' ? { debounce: 'fixed' } : {});
+  p.tempo.setBounds(m === 'beat' ? { lo: b.lo, hi: Math.max(b.lo, Math.min(b.hi, BEAT_MODE_MAX_RATE)) } : b);
+  if (p.tempo.playbackRate > p.tempo.bounds.hi) p.tempo.playbackRate = p.tempo.bounds.hi;
+}
+
 // 演奏者的執行期狀態，每人一份：計畫（plan：performancePlan.js 的 performers，載入後不變）、速度追蹤 tempo，以及播放狀態（_resetPlayback() 要全部重設）。
-// tempo：改指派時同一槽位沿用舊的（速度估計保留，見 reassign()），沒給就新建（1×）；速度區間一律換成他的計畫算的。
-function makePerformerState(index, plan, tempo = new TempoFollower()) {
-  tempo.setBounds(plan.rateBounds);
-  return {
+// tempo：改指派時同一槽位沿用舊的（速度估計保留，見 reassign()），沒給就新建（1×）；速度區間一律換成他的計畫算的（依模式，見 applyMode）。
+// setting：模式設定（'auto'｜三種模式之一）；mode：目前實際用的模式（自動時由 modeAdvisor 決定，起始是 onset）。
+function makePerformerState(index, plan, tempo = new TempoFollower(), setting = 'onset', mode = setting === 'auto' ? 'onset' : setting) {
+  const p = {
+    mode,                  // 目前的演奏模式（見上）
+    modeSetting: setting,  // 模式設定：'auto'＝由 modeAdvisor 依演奏情況切換；其餘＝固定（只給建議）
+    advisor: new ModeAdvisor(),
+    suggestion: null,      // modeAdvisor 最近的建議 { mode, reason }｜null
     index,                 // 演奏者序號（對外事件的 group；依指派下拉順序）
     slot: plan.slot,       // 槽位（'kb'、1~4；整首自動播放的空計畫是 null）
     plan,
@@ -244,7 +271,11 @@ function makePerformerState(index, plan, tempo = new TempoFollower()) {
     lastAutoMs: null,      // 他上一個起音被自動放行的時鐘（代打交還時比哪個起音最近）
     // 剛落後跳過（被合奏拉到前面）的人還要連續幾下同步才能接手帶頭：剛跳完的人位置是合奏給的、不是他自己的節奏，馬上交給他帶，下一下就又出狀況換回來（來回跳）
     jumpRecover: 0,
+    lastPressSec: null,    // 他上一下被接受的按鍵對應的樂譜秒（_accept；拍子模式的估速與去抖從這裡算）
+    headMotionMs: null,    // 他按下目前這一組的那一下的動作時刻（modeAdvisor 判斷「按在組內音上」用）
   };
+  applyMode(p);
+  return p;
 }
 
 // 合奏（伴奏）的執行期狀態：帶頭的人、合奏錨點（anchor 跟帶頭的人觸發時的錨點是同一個物件）、合奏走到過的最遠位置
@@ -259,6 +290,7 @@ export class Scheduler {
     this._ledger = new VoiceLedger(this._router, this.events);   // 發聲帳本：正在響的音、hold、尾巴收尾、先進先出收音（見 voices.js）
     this._score = null;
     this._plan = buildPlan(null);   // 載入後不變的計畫（staff、每位演奏者、伴奏、總音數、hold 容差上限；見 performancePlan.js）
+    this._modeSettings = new Map(); // 槽位 → 模式設定（setMode()；是設定不是播放狀態：載入、改指派、重設都保留）
     this._setPerformers();          // 每位演奏者的執行期狀態（_performers、依槽位查的 _bySlot）
     this._ensemble = makeEnsemble();
     this._roster = new Roster();   // 名單：誰先開始演奏（ensemble.js）
@@ -316,7 +348,8 @@ export class Scheduler {
         tempo = new TempoFollower();
         if (fallbackRate !== undefined) tempo.playbackRate = fallbackRate;
       }
-      const p = makePerformerState(i, plan, tempo);
+      const setting = this._modeSettings.get(plan.slot) ?? 'onset';
+      const p = makePerformerState(i, plan, tempo, setting, setting === 'auto' ? (old?.mode ?? 'onset') : setting);
       if (old) { p.lastTriggerMs = old.lastTriggerMs; p.absentSinceMs = old.absentSinceMs; }
       return p;
     });
@@ -505,6 +538,8 @@ export class Scheduler {
       p.restEndMs = null;
       p.lastAutoMs = null;
       p.jumpRecover = 0;
+      p.lastPressSec = null;
+      p.headMotionMs = null;
       p.tempo.reset();
     }
     this._ensemble = makeEnsemble();
@@ -600,6 +635,110 @@ export class Scheduler {
         }))),
       })),
     };
+  }
+
+  /**
+   * 設定一位演奏者（槽位）的演奏模式：'auto'（由 modeAdvisor 依演奏情況切換，起始是起音）或 'musician'／'onset'／'beat'（固定，只給建議）。
+   * 是設定不是播放狀態：載入、改指派、重設都保留；這個槽位現在沒有聲部也記著。改了下一下就照新的模式放。
+   */
+  setMode(slot, setting) {
+    if (setting !== 'auto' && !MODES.includes(setting)) throw new Error(`不認得的演奏模式：${setting}`);
+    this._modeSettings.set(slot, setting);
+    const p = this._bySlot.get(slot);
+    if (p) {
+      p.modeSetting = setting;
+      if (setting !== 'auto') this._switchMode(p, setting, 'user');
+      else this.events.queue('mode', { slot, mode: p.mode, setting, suggestion: p.suggestion, reason: 'user', clockMs: this._clockMs });
+    }
+    this.events.flush();
+  }
+
+  /** 這個槽位的模式設定（沒設過是 'onset'） */
+  modeSettingOf(slot) { return this._modeSettings.get(slot) ?? 'onset'; }
+
+  // 換模式（使用者選的、或自動）：速度追蹤照新的模式設定，modeAdvisor 從頭累積。正在進行的一組照舊放完，下一下才照新的模式分組。
+  _switchMode(p, mode, reason) {
+    if (p.mode === mode) return;
+    const from = p.mode;
+    p.mode = mode;
+    applyMode(p);
+    p.advisor.switched(this._clockMs);
+    p.suggestion = null;
+    this.events.queue('mode', { slot: p.slot, from, mode, setting: p.modeSetting, suggestion: null, reason, clockMs: this._clockMs });
+  }
+
+  // 按下之前先記下 modeAdvisor 要的（拍子模式）：這一下是不是按在一拍中間（離這一拍的頭與下一拍的拍線都超過 1/4 拍），
+  // 是不是按在這一拍裡他自己某個音（電腦照樂譜替他放的、或正要放的）的時刻附近——照每個音在按的人
+  _advisorProbe(p, motion) {
+    const none = { midGroup: false, onsetHit: false };
+    const a = p.anchor, k0 = p.lastHead;
+    if (p.mode !== 'beat' || k0 === null || !a || p.headMotionMs === null) return none;
+    // 跟動作時刻比：以他按下這一組的那一下的動作時刻為原點（錨點用的是程式收到的時刻，揮手晚約 110ms）
+    const t = p.plan.driverTicks, rate = a.rate, origin = p.headMotionMs, headSec = this._pressSec(p, k0);
+    const due = (k) => origin + ((this._secOf(t[k]) - headSec) * 1000) / rate;
+    const quarter = this._beatMsNow() / 4;
+    const nextLine = p.groupEnd < t.length ? origin + ((this._pressSec(p, p.groupEnd) - headSec) * 1000) / rate : Infinity;
+    if (motion < origin + quarter || motion > nextLine - quarter) return none;
+    let hit = false;
+    for (let k = k0 + 1; k < p.groupEnd && !hit; k++) {
+      const gap = ((this._secOf(t[k]) - this._secOf(t[k - 1])) * 1000) / rate;
+      hit = Math.abs(motion - due(k)) <= Math.max(90, 0.3 * gap);
+    }
+    return { midGroup: true, onsetHit: hit };
+  }
+
+  // 餵 modeAdvisor 一次按鍵（e，沒有就只重新判斷），依結果切換（自動）或更新建議
+  _advise(p, e, clock) {
+    if (e) {
+      const head = p.lastHead === null ? null : this._secOf(p.plan.driverTicks[p.lastHead]);
+      p.advisor.observe({ ...e, scoreSec: head, zone: p.zone, rate: p.tempo.playbackRate });
+    }
+    const d = p.advisor.decide(p.mode, p.modeSetting, clock);
+    if (d.switchTo) { this._switchMode(p, d.switchTo, d.suggestion.reason); return; }
+    const sug = d.suggestion;
+    if ((sug?.mode ?? null) !== (p.suggestion?.mode ?? null)) {
+      p.suggestion = sug;
+      this.events.queue('mode', { slot: p.slot, from: p.mode, mode: p.mode, setting: p.modeSetting, suggestion: sug, reason: sug?.reason ?? null, clockMs: clock });
+    }
+  }
+
+  /** 演奏者下一下要按的起音（index，對 inspect().groups[].segments）：還在進行的一組之後的那個；有預按在等（已經按過、到點才放）時是那一組之後的那個 */
+  nextPressIndex(slot) {
+    const p = this._bySlot.get(slot);
+    if (!p) return null;
+    if (!p.credit || p.groupEnd >= p.plan.driverSegs.length) return p.groupEnd;
+    return this._groupEnd(p, p.groupEnd, p.tempo.playbackRate, p.credit.source);
+  }
+
+  /**
+   * 給畫面用的輕量狀態（每幀可以呼叫，不複製樂譜）：合奏位置、每位演奏者的模式、狀態、下一下會放出哪些起音（[from, to)，依目前的速度與他上一次的輸入來源預估；
+   * 起音模式的分組依按下那一刻估到的速度決定，偶爾跟預估差一個）。state：'waiting'（還沒進場）｜'playing'｜'behind'（落後，該按了）｜'resting'｜'substitute'（電腦代打中）｜'done'。
+   */
+  viewState() {
+    const E = this._ensemble;
+    return {
+      playing: this._playing, clockMs: this._clockMs, positionTicks: this.getPositionTicks(), rate: this.playbackRate, leaderSlot: E.leader?.slot ?? null,
+      performers: this._performers.filter((p) => p.slot !== null).map((p) => {
+        const n = p.plan.driverSegs.length, from = p.groupEnd;
+        const to = from < n ? this._groupEnd(p, from, p.tempo.playbackRate, p.lastSource) : from;
+        return {
+          slot: p.slot, mode: p.mode, setting: p.modeSetting, suggestion: p.suggestion, status: p.status, state: this._stateOf(p),
+          isLeader: p === E.leader, rate: p.tempo.playbackRate, cursor: p.cursor, next: { from, to, ticks: p.plan.driverTicks[from] ?? null }, credit: p.credit?.kind ?? null,
+        };
+      }),
+    };
+  }
+
+  // 給演奏者看的狀態（見 viewState()）
+  _stateOf(p) {
+    const n = p.plan.driverSegs.length;
+    if (p.status === 'substitute') return 'substitute';
+    if (p.groupEnd >= n && p.cursor >= n) return 'done';
+    if (!this._score || !this._ensemble.anchor) return 'waiting';
+    if (p.credit?.kind === 'prelude' || (p.lastHead === null && p.plan.hasPrelude && this._reachClockMs(p) === null)) return 'waiting';
+    if (this._isResting(p)) return 'resting';
+    if (this._missedCount(p) > 0 || (p.xMs !== null && p.xMs < 0 && (p.zone === 'off' || p.zone === 'lost')) || this._stallWhy(p, this._clockMs) === 'overdue') return 'behind';
+    return 'playing';
   }
 
   /** 這個 tick 屬於合奏的第幾段（帶頭的人的第一個起音之前＝第 0 段）。唯讀查詢。呼叫的 sliceOfTick(...) 是 performancePlan.js 匯出的同名函式，類別方法名稱不會變成可直接呼叫的變數名。 */
@@ -768,6 +907,8 @@ export class Scheduler {
       const absentMs = p.absentSinceMs === null ? 0 : clock - p.absentSinceMs;
       if (!shouldSubstitute({ missed, sinceLastMs: since, beatMs: beat, absentMs, k: this.cfg.stage2K })) continue;
       this._setStatus(p, 'substitute', 'stage2', clock);
+      p.advisor.observeSubstitute();
+      this._advise(p, null, clock);
       p.lastAutoMs = null;   // 上一次代打留下的不算
       this._substituteFrom(p, snapTick(this.getPositionTicks()), clock);
     }
@@ -830,6 +971,8 @@ export class Scheduler {
     for (let s = q.cursor; s < end; s++) {
       autos.push({ dueMs: dueOf(ticks[s]), ticks: ticks[s], autoRelease: s, owner: q });
       for (const { staff, note } of segs[s].items) {
+        // lookahead 已經帶時間戳送出的音（自動放行還沒到、游標還沒過）不能再排：合奏重新對時（換帶頭、拍子模式開始一拍）時會重建代打的佇列，不跳過就會響兩次
+        if (this._sounded.has(note)) continue;
         const dueMs = dueOf(note.startTick);
         q.timed.push({ dueMs, offMs: dueMs + scaledMs(this._secOf(note.endTick) - this._secOf(note.startTick), rate), staff, note, own: true, mode: null, owner: q, seq: ++this._seq });
       }
@@ -866,9 +1009,9 @@ export class Scheduler {
     const k = p.cursor;
     this._clockMs = clock;
     this._lastTickMs = ev.receivedMs;
-    if (ev.key != null) this._ledger.takeOver(p.slot, ticks[k - 1], ev.key);
+    if (this._keyOf(p, ev.key) != null) this._ledger.takeOver(p.slot, ticks[k - 1], ev.key);
     p.tempo.forgetHistory();
-    p.tempo.accept(k - 1, this._secOf(ticks[k - 1]), null, motion);
+    this._accept(p, k - 1, this._secOf(ticks[k - 1]), null, motion);
     p.lastHead = k - 1;
     this._anchorSlice(p, k, p.lastAutoMs, this._secOf(ticks[k - 1]), p.tempo.playbackRate, this.getPositionTicks(), k, null, false);   // 他這一段的錨點：電腦放出 k−1 的那一刻；控制器從合奏位置起排
     this._pressEvent(p, ev, clock, 'takeover');
@@ -1096,7 +1239,10 @@ export class Scheduler {
     // 還沒有人帶頭：他先成為帶頭的人，這一下照帶頭的人處理（前奏、N2 早按）。已經有人帶頭：這一下先照不是帶頭的人處理（x、跳、鎖），再看要不要換人——
     // 先換的話，落後的人這一下會以帶頭的人的身分放他落後的起音，合奏停在原處等他、不會跳到合奏位置（規格「合奏」）
     if (!cur) this._updateLeader(clock, null, false, p);
+    const probe = this._advisorProbe(p, motion);
+    this._lastPressResult = null;
     const released = this._triggerBody(p, ev, clock, motion);
+    if (this._lastPressResult) this._advise(p, { ms: motion, ...this._lastPressResult, ...probe }, clock);
     // 新加入的人因為同時開始排到現任前面：換人的原因是 tie。這一下也可能是他最後一個起音（彈完交棒）
     const tie = isNew && cur && R.slots().indexOf(p.slot) < R.slots().indexOf(cur.slot);
     this._updateLeader(clock, tie ? 'tie' : null, false, p);
@@ -1124,13 +1270,18 @@ export class Scheduler {
     // 休止符鎖（N8；帶頭的人、單人也一樣）：這個起音前面有 ≥ ENSEMBLE.REST_LOCK_BEATS 拍的休止，動作那一刻合奏位置離起音還有 REST_LOCK_BEATS 拍以上
     // （合奏可以還在休止前最後一個音裡）→ 記成預按，合奏走到這個起音時放出。收到時合奏已經走到起音（揮手確認晚到、休止已經結束）就照常放行。
     if (this._restLocked(p, j, motion, clock)) return this._restCredit(p, ev, clock);
+    // 拍子模式「打拍子」：他自己的音還在延長（二分、全音符），他照拍子揮了一下，下一拍的音離現在還超過 BEAT_HOLD_AHEAD 拍——這一下是在跟拍子，
+    // 不是要提早放下一拍：不加音（檔案裡這一拍他沒有新的音）、不往前，只算他正在彈。不然跟著拍子揮的人每逢長音就把下一拍提早放出來，越彈越趕。
+    if (p.mode === 'beat' && p.lastHead !== null && this._beatKeeping(p, j, motion)) { this._pressEvent(p, ev, clock, this._beatHold(p, j, motion)); return false; }
     // 超前鎖住期間再觸發：只算一下（照樣記進按鍵記錄）
     if (p.credit?.kind === 'ahead') { this._pressEvent(p, ev, clock, 'ahead'); return false; }
+    if (p.credit?.kind === 'beat') { this._pressEvent(p, ev, clock, 'beat'); return false; }   // 這一拍已經開始、他的切分音還沒到：再按也只算一下
 
     // 去抖（tempo.js 的 attempt()）：這一步依目前速度預估的真實長度，從他上一次按下的起音（組頭）算起（第一下沒有上一個，去抖不會用到）。
     // 去抖與估速都用動作時刻：程式收到的時刻多了輸入與確認的延遲（揮手確認要等手回升），不是他的節奏
-    const head = p.lastHead === null ? null : this._secOf(p.plan.driverSegs[p.lastHead].ticks);
-    const blocked = p.tempo.attempt(motion, head === null ? 0 : ((this._secOf(p.plan.driverTicks[j]) - head) * 1000) / p.tempo.playbackRate);
+    const head = this._prevPressSec(p);
+    const stepSec = head === null ? 0 : this._pressSec(p, j) - head;
+    const blocked = p.tempo.attempt(motion, (stepSec * 1000) / p.tempo.playbackRate, p.mode === 'beat' ? (BEAT_DEBOUNCE_FLOOR * stepSec * 1000) / BEAT_MODE_MAX_RATE : 0);
     if (blocked) { this._pressEvent(p, ev, clock, 'blocked'); return false; }
 
     // 相對時間 x 與區間（規格「合奏」）：落後太多就跳到合奏位置；揮手超前太多就鎖到只超前 1/2 拍
@@ -1162,11 +1313,16 @@ export class Scheduler {
     this._trackRecovery(p, clock, motion, p.plan.driverTicks[j], jumped);
     if (!jumped && p.jumpRecover > 0 && (p.zone === 'sync' || p.zone === 'slight')) p.jumpRecover--;
     if (act === 'lock') {
-      p.tempo.accept(j, this._secOf(p.plan.driverTicks[j]), head, motion);   // 鎖住的這一下照樣進估速與去抖（放出時不再算一次）
+      this._accept(p, j, this._secOf(p.plan.driverTicks[j]), head, motion);   // 鎖住的這一下照樣進估速與去抖（放出時不再算一次）
       p.lastHead = j;
       p.credit = { kind: 'ahead', key: ev.key ?? null, lifted: false, source: ev.source ?? null };
       this._pressEvent(p, ev, clock, 'ahead', jumped);
       return false;
+    }
+    // 拍子模式、這一拍他的第一個音在拍線之後（切分）：這一下是「開始這一拍」——合奏（他帶頭時）此刻走到拍線、拍上的音當下響，他自己的音照樂譜在拍內出來（_beatCredit）
+    if (p.mode === 'beat' && !jumped) {
+      const line = this._pressTick(p, j), H = p.plan.driverTicks[j];
+      if (line < H - TICK_EPS && this._positionAt(clock) < H - TICK_EPS) return this._beatCredit(p, ev, clock, motion, j, line, head);
     }
     this._pressEvent(p, ev, clock, 'released', jumped);   // 放行必定接著 _release()
 
@@ -1175,8 +1331,72 @@ export class Scheduler {
     this._lastTickMs = ev.receivedMs;
     const inFlight = this._takeInFlight(p, clock);
     this._flushAutoReleases(p, clock);   // 提早按下一組：這一組還沒到的自動放行先依序做完（hold 與收音的狀態才一致）
-    this._release(p, clock, ev.source ?? null, inFlight, keyupOf(ev.key), false, motion);
+    this._release(p, clock, ev.source ?? null, inFlight, keyupOf(this._keyOf(p, ev.key)), false, motion);
     return true;
+  }
+
+  // keyup 模式用的鍵：音的長短由放開決定只在起音與音樂家模式；拍子模式的音長一律照樂譜（他帶的是拍子，不是每個音），當成不帶鍵（有 hold）
+  _keyOf(p, key) { return p.mode === 'beat' ? null : key ?? null; }
+
+  // 第 j 個起音「按下去」對應的樂譜位置：拍子模式是它所在那一拍的拍線（切分音在拍線之後，他是照拍線揮的），其餘模式就是起音本身。
+  // 估速、去抖、這一步多長都用它：拍子模式的速度是拍線到拍線，不會因為切分把間隔量歪
+  _pressTick(p, j) { return p.mode === 'beat' ? Math.min(p.plan.unitLine[j] ?? p.plan.driverTicks[j], p.plan.driverTicks[j]) : p.plan.driverTicks[j]; }
+  _pressSec(p, j) { return this._secOf(this._pressTick(p, j)); }
+
+  // 他上一下（被接受的）按下去對應的樂譜秒：估速的間隔與去抖的這一步都從這裡算。拍子模式包含「打拍子」那幾下（_beatHold），其餘模式是他上一個組頭。
+  _prevPressSec(p) {
+    if (p.mode === 'beat' && p.lastPressSec !== null) return p.lastPressSec;
+    return p.lastHead === null ? null : this._pressSec(p, p.lastHead);
+  }
+
+  // 一下進估速（TempoFollower.accept）並記下它的樂譜位置
+  _accept(p, j, sec, prevSec, motion) {
+    p.tempo.accept(j, sec, prevSec, motion);
+    p.lastPressSec = sec;
+  }
+
+  // 拍子模式的「打拍子」（見 _triggerBody）：這一下對應合奏在動作那一刻最近的拍線；跟上一下同一條拍線（或太近）就擋掉，否則照一般的去抖，
+  // 通過就進估速（拍線到拍線）——跟著拍子揮的人每一拍都在告訴我們速度，只靠放音的那幾下估速，長音多的聲部速度會越估越慢。回傳 'hold' 或 'blocked'。
+  _beatHold(p, j, motion) {
+    const lines = this._plan.beatLines, pos = this._positionAt(motion);
+    let i = lines.length ? Math.min(lines.length - 1, Math.max(0, lowerBound(lines, pos) - 1)) : -1;
+    if (i >= 0 && i + 1 < lines.length && lines[i + 1] - pos < pos - lines[i]) i++;
+    const lineSec = i >= 0 ? this._secOf(lines[i]) : this._secOf(pos);
+    const prev = this._prevPressSec(p);
+    const stepSec = prev === null ? 0 : lineSec - prev;
+    if (prev !== null && stepSec <= 0.25 * (this._beatMsNow() / 1000) * p.tempo.playbackRate) { p.tempo.attempt(motion, Infinity); return 'blocked'; }
+    if (p.tempo.attempt(motion, (stepSec * 1000) / p.tempo.playbackRate, (BEAT_DEBOUNCE_FLOOR * stepSec * 1000) / BEAT_MODE_MAX_RATE)) return 'blocked';
+    this._accept(p, Math.max(1, j), lineSec, prev, motion);
+    return 'hold';
+  }
+
+  // 拍子模式「開始這一拍」（見 _triggerBody）：他這一拍的第一個音 j 在拍線 line 之後。這一下進估速（對應拍線的位置）；他帶頭時合奏在這一刻走到拍線
+  //（落在拍線之前還沒響的音照垂直切片，拍線上的音當下響；合奏已經過了拍線就從原處以新的速度重新對時），之後照速度走到 j，到了由 tick() 放出他的音（預按 'beat'）。
+  // 不是帶頭的人只記預按，合奏走到 j 時放出。
+  _beatCredit(p, ev, clock, motion, j, line, head) {
+    this._clockMs = clock;
+    this._lastTickMs = ev.receivedMs;
+    this._accept(p, j, this._secOf(line), head, motion);
+    p.lastHead = j;
+    if (p === this._ensemble.leader) {
+      const inFlight = this._takeInFlight(p, clock);
+      this._flushAutoReleases(p, clock);
+      const to = snapTick(Math.max(this._positionAt(clock), line));
+      this._chaseOrSkip(p, to, this._secOf(to), clock, inFlight, false);
+      this._jumpEnsemble(to, clock, p.tempo.playbackRate);
+      this._emitTimed(clock);
+      this._emitClock(clock);
+    }
+    p.credit = { kind: 'beat', key: ev.key ?? null, lifted: false, source: ev.source ?? null };
+    this._pressEvent(p, ev, clock, 'beat');
+    return false;
+  }
+
+  // 拍子模式：動作那一刻離第 j 個起音所在那一拍的拍線還有 BEAT_HOLD_AHEAD 拍以上（照合奏的位置與速度）。比拍線不比音：切分音在拍線之後，照拍子揮在拍上的那一下就是要放這一拍
+  _beatKeeping(p, j, motion) {
+    const line = Math.min(p.plan.unitLine[j] ?? p.plan.driverTicks[j], p.plan.driverTicks[j]);
+    const x = ((this._secOf(line) - this._secOf(this._positionAt(motion))) * 1000) / this.playbackRate;
+    return x > BEAT_HOLD_AHEAD * this._beatMsNow();
   }
 
   // 這一下記成休止符鎖的預按（合奏走到他的下一個起音時由 tick() 放出）；jumped＝落後跳之後落在休止裡
@@ -1207,7 +1427,7 @@ export class Scheduler {
     const sign = Math.sign(x);
     p.offRun = { sign, count: p.offRun.sign === sign ? p.offRun.count + 1 : 1 };
     if (zone === 'off' && p.offRun.count < ENSEMBLE.OFF_PERSIST) return null;
-    return sign < 0 ? 'jump' : source === 'gesture' ? 'lock' : null;
+    return sign < 0 ? 'jump' : source === 'gesture' && p.mode !== 'musician' ? 'lock' : null;   // 音樂家模式超前不鎖：他可以帶到前面
   }
 
   // 出狀況的人恢復正常，之後依名次拿回帶頭（_updateLeader）。多數決出狀況的：連續 ENSEMBLE.RECOVER_PERSIST 下 |x| < RECOVER_BEATS 拍（下限同稍快／稍慢的 SLIGHT_MIN_MS）；
@@ -1261,7 +1481,7 @@ export class Scheduler {
   // 演奏者 p 這一步（上一個組頭到下一個要他按的起音）依他的速度預估的真實長度（ms）；還沒按過就從前一個起音算，第一個起音是 0
   _stepMs(p) {
     const j = p.groupEnd, from = p.lastHead ?? j - 1;
-    return from < 0 ? 0 : ((this._secOf(p.plan.driverTicks[j]) - this._secOf(p.plan.driverTicks[from])) * 1000) / p.tempo.playbackRate;
+    return from < 0 ? 0 : ((this._pressSec(p, j) - this._pressSec(p, from)) * 1000) / p.tempo.playbackRate;
   }
 
   // 多數決：名單上除了帶頭的人 L 以外正在彈的人至少兩位（合計三人以上），而且過半同方向偏離、各連續 ENSEMBLE.MAJORITY_PERSIST 下
@@ -1323,8 +1543,8 @@ export class Scheduler {
     for (const [channel, lane] of this._plan.lanes) if (lane.targets.some((s) => s.slot === p.slot && s.kind === 'human')) this._chaseLane(channel, laneTick);
     if (chased.length || skipped.length || inFlight) this.events.queue('chase', { group: p.index, slot: p.slot, ticks: e, chased: chased.map((it) => it.note), skipped, inFlight });
     if (!chased.length) return false;
-    p.tempo.accept(k, this._secOf(this._positionAt(motion)), null, motion);   // 估速從他動作那一刻的合奏位置重新起算
-    const end = this._groupEnd(p, k - 1, rate, ev.source ?? null), keyup = keyupOf(ev.key);
+    this._accept(p, k, this._secOf(this._positionAt(motion)), null, motion);   // 估速從他動作那一刻的合奏位置重新起算
+    const end = this._groupEnd(p, k - 1, rate, ev.source ?? null), keyup = keyupOf(this._keyOf(p, ev.key));
     p.lastHead = k - 1;
     p.groupEnd = end;
     this._anchorSlice(p, k, clock, eSec, rate, e, end, keyup && LIFTED, false);   // 他這一段的錨點在 e、控制器從 e 起排、組員到點自動放行（keyup 模式同 _release）
@@ -1380,12 +1600,13 @@ export class Scheduler {
     // 還沒開始彈的人第一次放行：他的控制器之前沒有排過（跟著合奏走的那段只到他的入場點），先把他的控制器軌帶到這個起音之前的狀態
     if (p.anchor === null) for (const [channel, lane] of this._plan.lanes) if (lane.targets.some((s) => s.slot === p.slot && s.kind === 'human')) this._chaseLane(channel, seg.ticks);
     // 估速（停手與變速的判斷見 tempo.js）：間隔從他上一次按下的起音（組頭）算起
-    if (!tempoAccepted) p.tempo.accept(j, scoreSec, p.lastHead === null ? null : this._secOf(p.plan.driverSegs[p.lastHead].ticks), motion);
+    if (!tempoAccepted) this._accept(p, j, this._pressSec(p, j), this._prevPressSec(p), motion);
     const rate = p.tempo.playbackRate;                              // 這一下估完的速度
     const end = this._groupEnd(p, j, rate, source);                 // 按不及的近距起音併進這一組：[j＋1, end) 到點自動放行
     // 已經到期、tick 還沒來得及放的音（與控制器）要在游標前進之前放：結尾對齊這個起音的才會 hold，下面的 releaseHeld 才收得到它；也要在追音之前，同譜表的新音才截得到它們
     this._emitTimed();
     p.lastHead = j;
+    p.headMotionMs = motion;
     p.cursor = j + 1;
     p.groupEnd = end;
     this.events.queue('release', { group: p.index, slot: p.slot, index: j, ticks: seg.ticks, clockMs: clock });
@@ -1412,10 +1633,27 @@ export class Scheduler {
   // 有長度上限的來源（手勢，tempo.js 的 maxGroupSpanSec）再加一條：這個起音距組頭的真實時間不超過上限，不然停在這裡，下一次揮手就按得到。
   // 彈得慢間隔被拉開、併的就少，彈得快併的就多。回傳這一組的結束（不含）。
   _groupEnd(p, j, rate, source) {
+    if (p.mode === 'beat') return this._beatGroupEnd(p, j, rate, source);
     const segs = p.plan.driverSegs, minSec = minPressIntervalSec(source), spanSec = maxGroupSpanSec(source), headSec = this._secOf(segs[j].ticks);
     let m = j + 1;
     while (m < segs.length && (this._secOf(segs[m].ticks) - this._secOf(segs[m - 1].ticks)) / rate < minSec
       && (this._secOf(segs[m].ticks) - headSec) / rate < spanSec) m++;
+    return m;
+  }
+
+  // 拍子模式的一組：從 j 到這一拍（beats.js 的單位）結束；下一拍的頭離這一組的頭依目前速度近到這個輸入來源按不及（快歌用手揮）就連下一拍一起併進來，
+  // 但一組最多跨 BEAT_GROUP_MAX_SEC（真實秒）：不能一下自動放太久。
+  _beatGroupEnd(p, j, rate, source) {
+    const unit = p.plan.unitOf, n = unit.length, minSec = minPressIntervalSec(source), t = p.plan.driverTicks;
+    const sec = (k) => this._secOf(t[k]);
+    let m = j + 1;
+    while (m < n && unit[m] === unit[j]) m++;
+    let head = j;
+    while (m < n && (sec(m) - sec(head)) / rate < minSec && (sec(m) - sec(j)) / rate < BEAT_GROUP_MAX_SEC) {
+      head = m;
+      const u = unit[m];
+      while (m < n && unit[m] === u) m++;
+    }
     return m;
   }
 
@@ -1506,7 +1744,14 @@ export class Scheduler {
     this._ledger.sound(staff, note, offMs, dueMs, {
       holdScope: human ? staff.slot : 'ensemble', holdTicks: owner.plan.driverTicks, holdFrom: owner.cursor,
       rate: owner.tempo.playbackRate, fromTick, clockMs: this._clockMs, timed, mode: mode ?? null,
+      velocity: this._velocityOf(staff, note, owner),
     });
+  }
+
+  // 這顆音的力度：原檔的力度；電腦代打中的演奏者的音小聲一點（SUBSTITUTE_VELOCITY，小聲介入）。
+  _velocityOf(staff, note, owner) {
+    if (staff.kind === 'human' && owner?.status === 'substitute') return Math.max(1, Math.round(note.velocity * SUBSTITUTE_VELOCITY));
+    return note.velocity;
   }
 
   // 所有演奏者與合奏的 timed 佇列裡、時刻已到（≤ limitMs）的項目依 (時刻, 建批次順序) 合併送出：伴奏的音、組裡他的音、送電腦合成器的控制器、SysEx。
@@ -1580,10 +1825,11 @@ export class Scheduler {
   /** 量測：這首歌目前合奏的速度區間 { lo, hi }（帶頭的人的，rateBoundsFor 依他的聲部起音間隔算出的複本）。 */
   rateBounds() { return { ...this._holdOwner().tempo.bounds }; }
 
-  // 按鍵嘗試的事件（按鍵記錄 pressLog() 是它的訂閱者）。result：'released' 放行、'late' 合奏已經走過他最後一個音（落後跳之後沒有音可放）、'blocked' 被去抖擋掉、'prelude' 前奏中的預按、'rest' 休止符鎖的預按、
+  // 按鍵嘗試的事件（按鍵記錄 pressLog() 是它的訂閱者）。result：'released' 放行、'beat' 拍子模式開始一拍（他這一拍的音在拍線之後，到點放）、'hold' 拍子模式的打拍子（自己的長音還在響、下一拍還沒到）、'late' 合奏已經走過他最後一個音（落後跳之後沒有音可放）、'blocked' 被去抖擋掉、'prelude' 前奏中的預按、'rest' 休止符鎖的預按、
   // 'ahead' 揮手超前被鎖住、'takeover' 代打交還時接手電腦剛替他放的音（不重彈）；
   // jumped＝落後跳到合奏位置（_jumpBehind）。ev 是輸入事件（見 trigger()）：來源與事件發生的時刻原樣記下（用槽位觸發時是 null）。
   _pressEvent(p, ev, clockMs, result, jumped = false) {
+    this._lastPressResult = { result, jumped };
     this.events.queue('press', { group: p.index, slot: ev.slot, source: ev.source ?? null, key: ev.key ?? null, result, jumped, clockMs, eventTimeMs: ev.eventTimeMs ?? null, receivedMs: ev.receivedMs ?? null });
   }
 
@@ -1711,10 +1957,13 @@ export class Scheduler {
         : this._ensembleReachMs(c.kind === 'ahead' ? this._ticksBefore(tick, ENSEMBLE.AHEAD_RELEASE_BEATS) : tick);
       if (at === null || this._clockMs < at - EPS_MS) continue;
       // keyup 模式的預按：放出時鍵還按著就等 keyup，已經放開就照檔案長度收
-      const keyup = c.key != null ? (c.lifted ? LIFTED : keyupOf(c.key)) : null;
+      const key = this._keyOf(p, c.key);
+      const keyup = key != null ? (c.lifted ? LIFTED : keyupOf(key)) : null;
       p.lastTriggerMs = Math.max(p.lastTriggerMs, at);
       this._flushAutoReleases(p, at);
-      this._release(p, at, c.source, 0, keyup, c.kind === 'ahead');
+      // 拍子模式：這一下對應的是那一拍的拍線（切分音在拍線之後），估速與去抖的「按下時刻」用合奏走到拍線的那一刻
+      const lineAt = p.mode === 'beat' ? this._ensembleReachMs(this._pressTick(p, p.groupEnd)) : null;
+      this._release(p, at, c.source, 0, keyup, c.kind === 'ahead' || c.kind === 'beat', lineAt === null ? at : Math.min(at, lineAt));
     }
   }
 

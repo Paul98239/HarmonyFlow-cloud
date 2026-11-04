@@ -53,3 +53,27 @@ export const SCENARIOS = {
     if (stats.合奏.帶頭 !== 'kb') throw new Error(`帶頭的人不是 PC 鍵盤手：${JSON.stringify(stats.合奏)}`);
   },
 };
+
+SCENARIOS.modesUi = async ({ page, url, out }) => {
+  await boot(page, url);
+  await loadLocal(page, out, 'fastRuns');
+  await assignPart(page, 0, 'kb');
+  // 指派後模式下拉可用、預設「自動」；改成拍子
+  const mode = page.locator('#scorePartList .score-part-mode').first();
+  if (await mode.isDisabled()) throw new Error('指派之後模式下拉仍是 disabled');
+  if ((await mode.inputValue()) !== 'auto') throw new Error(`預設模式不是自動：${await mode.inputValue()}`);
+  await mode.selectOption('beat');
+  if (await page.locator('#scorePartList .score-part-mode').nth(1).isEnabled()) throw new Error('沒指派的聲部，模式下拉應該是 disabled');
+  await closePanel(page);
+  await play(page);
+  await page.focus('body');
+  // 拍子模式：跟著拍子按（96 BPM，一拍 625ms），長笛的快音群也會由電腦補上
+  for (let i = 0; i < 14; i++) { await page.keyboard.down(i % 2 ? 'KeyJ' : 'KeyF'); await page.waitForTimeout(120); await page.keyboard.up(i % 2 ? 'KeyJ' : 'KeyF'); await page.waitForTimeout(505); }
+  await page.waitForFunction(() => !document.getElementById('performer-hud').hidden, null, { timeout: 3000 });
+  const hud = await page.locator('#performer-hud').innerText();
+  if (!/PC 鍵盤手/.test(hud) || !/拍子/.test(hud)) throw new Error(`狀態列內容不對：${hud}`);
+  const v = await page.evaluate(() => window.__view());
+  const kb = v.performers.find((p) => p.slot === 'kb');
+  if (kb.mode !== 'beat') throw new Error(`排程器的模式是 ${kb.mode}`);
+  if (kb.cursor < 30) throw new Error(`按了 14 拍只放到第 ${kb.cursor} 個音（快音群沒有被補上）`);
+};

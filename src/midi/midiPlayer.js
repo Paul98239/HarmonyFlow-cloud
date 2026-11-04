@@ -45,6 +45,7 @@ const LOADING_INDICATOR_DELAY_MS = 120; // 按播放後延遲這麼久才顯示 
  * @property {object | null} score       parseMidi() 的結果；null ＝ 沒有分譜資訊（單軌或解析失敗）
  * @property {object[]} parts            score.parts；沒有聲部（長度 0）才不顯示分譜區塊
  * @property {Map<string, number|string>} assignments 指派單位 id（part id，或單聲部多行譜時的 staff id）→ 演奏者槽位（1~4 或 KEYBOARD_SLOT）；改動時換新 Map
+ * @property {Map<number|string, string>} modes  演奏者槽位 → 演奏模式設定（'auto'｜'musician'｜'onset'｜'beat'；見 modeAdvisor.js）；沒列的是 'auto'。是每位演奏者的設定，不是每個聲部
  * @property {number} playerCount        系統控制 bar 選的「現場人數」；0 ＝ 還沒選
  * @property {number} positionSeconds    目前播放位置（演奏：樂譜原始秒數，同 note.startSeconds 座標系；試聽：官方 currentTime）；
  *                                       頂端進度條唯讀顯示用，沒有任何 seek 路徑會寫它
@@ -63,6 +64,7 @@ export const playerStore = new Store(/** @type {PlayerState} */ ({
   score: null,
   parts: [],
   assignments: new Map(),
+  modes: new Map(),
   playerCount: 0,
   positionSeconds: 0,
   previewDuration: 0,
@@ -122,6 +124,25 @@ const updateHumanGate = () => {
 export function triggerInput(input) {
   synth.scheduler.trigger(input);
 }
+
+// 演奏模式（每位演奏者一個）：預設「自動」——從起音開始，依演奏情況切到適合他的那一層（見 modeAdvisor.js）；選了固定的模式就不自動切、只給建議。
+export const DEFAULT_MODE = 'auto';
+const ALL_SLOTS = [KEYBOARD_SLOT, 1, 2, 3, 4];
+export const modeOf = (slot) => playerStore.state.modes.get(slot) ?? DEFAULT_MODE;
+export function setPerformerMode(slot, setting) {
+  const modes = new Map(playerStore.state.modes);
+  modes.set(slot, setting);
+  playerStore.set({ modes });
+  synth.scheduler.setMode(slot, setting);
+}
+
+// 給畫面（演奏者狀態列、樂譜視覺化）的輕量狀態，見 scheduler.js 的 viewState()
+export const performerView = () => synth.scheduler.viewState();
+export const scoreOf = () => (synth.isLoaded() ? playerStore.state.score : null);
+// 訂閱排程器的演奏事件（mode、release…，見 scheduler.js 的 PerformanceEvents），回傳取消訂閱的函式
+export const onPerformanceEvent = (type, fn) => synth.scheduler.events.on(type, fn);
+// 畫面上的演奏資訊（狀態列、樂譜）該不該顯示：演奏模式、播過了而且還沒換歌
+export const isPerforming = () => { const s = playerStore.state; return s.mode === 'perform' && s.started && (s.transport === 'playing' || s.transport === 'paused'); };
 
 // 在場名單（main.js 把揮手監聽收到的 presentSlots 接到這裡）：排程器記下揮手的人從什麼時候開始不在鏡頭裡，帶頭的人不在場時不等寬限就換人（見 scheduler.js 的 setPresence()）。
 export function setPresentSlots(slots) {
@@ -488,6 +509,7 @@ function schedulerTick() {
 // main.js 呼叫一次；不靠 import 副作用啟動。
 export function startPlayer() {
   synth.scheduler.enableEventLog();   // 錄音 v3 的事件串流（pressLog()）：app 一律記，彈完隨時可以匯出
+  for (const slot of ALL_SLOTS) synth.scheduler.setMode(slot, modeOf(slot));   // 排程器的模式設定跨載入保留，開機時對齊播放器的預設
   setInterval(uiTick, UI_TICK_MS);
   setInterval(schedulerTick, SCHEDULER_TICK_MS);
 }
@@ -782,6 +804,11 @@ const songPanelFields = {
     selectLocalFile(file);
   },
   'part-assign': (el) => assignPart(el.dataset.partId, el.value),
+  // 演奏模式：設定的是這個聲部目前指派的那位演奏者（同一個人負責的其他聲部一起變）
+  'part-mode': (el) => {
+    const slot = playerStore.state.assignments.get(el.dataset.partId);
+    if (slot !== undefined) setPerformerMode(slot, el.value);
+  },
 };
 
 function buildPartRow(unit, playerCount) {
@@ -792,6 +819,7 @@ function buildPartRow(unit, playerCount) {
   select.dataset.partId = unit.id;
   select.append(new Option('無', ''), new Option('PC 鍵盤手', KEYBOARD_SLOT));
   for (let n = 1; n <= playerCount; n++) select.append(new Option(`演奏者 ${n}`, String(n)));
+  row.querySelector('.score-part-mode').dataset.partId = unit.id;
   return row;
 }
 
@@ -823,7 +851,12 @@ function renderSongPanel({ player }) {
     const assigned = player.assignments.get(sel.dataset.partId);   // 1~4、KEYBOARD_SLOT 或 undefined
     const value = assigned === undefined ? '' : String(assigned);
     if (sel.value !== value) sel.value = value;
-    sel.closest('.score-part-row').classList.toggle('is-mine', assigned !== undefined);
+    const row = sel.closest('.score-part-row');
+    row.classList.toggle('is-mine', assigned !== undefined);
+    const modeSel = row.querySelector('.score-part-mode');
+    const mode = assigned === undefined ? DEFAULT_MODE : (player.modes.get(assigned) ?? DEFAULT_MODE);
+    if (modeSel.value !== mode) modeSel.value = mode;
+    modeSel.disabled = assigned === undefined;
   }
 }
 

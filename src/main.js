@@ -6,6 +6,7 @@ import { startVision, setPoseCountListener, setPerformanceStateListener, warmPos
 import { startKeyboardTrigger, getInputDelays } from './input/keyboard.js';
 import { createGestureTrigger } from './input/gestureTrigger.js';
 import { summarizeMs } from './midi/tempo.js';
+import { startPerformerHud } from './score/performerHud.js';
 
 // __stats() 只量 JS 層，音訊段由「音訊輸出」補上，「估計按下到出聲ms」把整條路串起來。
 window.__stats = () => {
@@ -26,6 +27,8 @@ window.__stats = () => {
 };
 
 window.__pressLog = midiPlayer.pressLog;
+// __view()：每位演奏者目前的模式、狀態、下一下會放出哪些音（scheduler.js 的 viewState()）
+window.__view = midiPlayer.performerView;
 
 // copy(__visionLog())：這一段演奏（從頭播起，暫停與曲終不記）的逐幀紀錄（兩手手腕、脖子以下節點的原始／world／平滑座標與 presence、偵測、鎖定的手、推論耗時）與追蹤層的鎖定／釋放事件，
 // 查手點互相干擾與多出來的 ID 用；__visionLog(15) 只取最後 15 秒。先按 ❚❚ 再切 DevTools 打指令，打字的那段就不會記進去。
@@ -102,6 +105,8 @@ async function bootSystem() {
   startKeyboardTrigger(midiPlayer.triggerInput, midiPlayer.KEYBOARD_SLOT, midiPlayer.liftInput);
   const onGesture = createGestureTrigger(midiPlayer.triggerInput);
   setPerformanceStateListener((state) => { onGesture(state); midiPlayer.setPresentSlots(state.presentSlots); });
+
+  startPerformerHud({ getView: midiPlayer.performerView, isActive: midiPlayer.isPerforming, subscribeMode: (fn) => midiPlayer.onPerformanceEvent('mode', fn) });
 
   // 視覺初始化失敗時錯誤畫面已經顯示，載入畫面不收、inert 也維持
   if (!visionOk) return;

@@ -3,6 +3,7 @@
 // 控制器屬於輸入 channel（parser 的 channelLanes），扇出到所有來源是該 channel 的譜表（lanes），再依擁有者拆給演奏者或伴奏；播放中途的控制器跟音一樣依起音切段。
 
 import { rateBoundsFor } from './tempo.js';
+import { beatUnitsFor, unitLineTicks, beatLines } from './beats.js';
 import { holdCapTicksFor, holdGapTolerance } from './voices.js';
 import { byFileOrder, GM_DEFAULT_MIXER, BANK_MSB_RHYTHM } from './midiParser.js';
 
@@ -155,7 +156,7 @@ export function sliceOfTick(driverTicks, tick) {
 export const slotOrder = (slot) => (typeof slot === 'number' ? slot : 0);
 
 // 沒有任何演奏者（整首自動播放）時排程器用的空計畫：只有第 0 段，伴奏從開頭照原速放完（同一條程式路徑）
-export const emptyPerformerPlan = () => ({ slot: null, staffIds: new Set(), driverSegs: [], driverTicks: [], rateBounds: rateBoundsFor([]), controls: [], controlTicks: [], hasPrelude: false, rests: [] });
+export const emptyPerformerPlan = () => ({ slot: null, staffIds: new Set(), driverSegs: [], driverTicks: [], rateBounds: rateBoundsFor([]), controls: [], controlTicks: [], hasPrelude: false, rests: [], unitOf: [], unitLine: [] });
 
 // 一個人的休止：他所有音的 [起音, 結尾) 合起來之後的空檔（notes 依起音排序）。空檔不超過 hold 的容差（匯出器縮短的相連音：MuseScore 少 1 tick、
 // 部分匯出器統一縮短約 5.4%）不算；第一個音之前與最後一個音之後不算（前奏另有前奏鎖，最後一個音之後他已經彈完）。MIDI 沒有休止的編碼，只能這樣推算。
@@ -174,6 +175,7 @@ export function computeRests(notes, holdCapTicks) {
 //  · controls／controlTicks：送他的譜表的控制器（依檔案順序）；落在他某個起音 tick 上的控制器屬於那個起音啟動的段，跟同 tick 的音一起在按下的那次呼叫裡送。
 //  · hasPrelude：他的第一個起音之前有別的音（伴奏或別人的聲部）＝前奏鎖要生效（純 tick 比較）；rateBounds：依他自己的起音間隔的速度區間。
 //  · rests：他的休止區間 [起, 迄)（computeRests）；firstTick／lastTick：他的第一個與最後一個起音。
+//  · unitOf／unitLine：拍子模式的單位（beats.js）：unitOf[j]＝第 j 個起音屬於第幾拍（同一個值的起音一下放），unitLine[j]＝那一拍的拍線 tick。
 function buildPerformer(score, staves, slot, controls, earliestTick, holdCapTicks) {
   const staffIds = new Set([...staves.values()].filter((s) => s.kind === 'human' && s.slot === slot).map((s) => s.id));
   const driverSegs = [], driverTicks = [];
@@ -194,10 +196,11 @@ function buildPerformer(score, staves, slot, controls, earliestTick, holdCapTick
     if (targets.length) mine.push({ ev: c.ev, targets });
   }
   const hasPrelude = driverTicks.length > 0 && earliestTick < driverTicks[0];
+  const unitOf = beatUnitsFor(score, driverTicks);
   const rests = computeRests(driverSegs.flatMap((seg) => seg.items.map((it) => it.note)), holdCapTicks);
   return {
     slot, staffIds, driverSegs, driverTicks, rateBounds, controls: mine, controlTicks: mine.map((c) => c.ev.ticks), hasPrelude,
-    rests, firstTick: driverTicks[0], lastTick: driverTicks.at(-1),
+    rests, firstTick: driverTicks[0], lastTick: driverTicks.at(-1), unitOf, unitLine: unitLineTicks(score, unitOf),
   };
 }
 
@@ -228,7 +231,7 @@ function buildAccompaniment(score, staves, controls) {
 export function buildPlan(score, assignments, router) {
   if (!score) {
     const accompaniment = { followers: [], followerTicks: [], controls: [], controlTicks: [] };
-    return { staves: new Map(), unplaced: [], totalNotes: 0, holdCapTicks: 0, lanes: new Map(), globalSysex: [], performers: [], accompaniment };
+    return { staves: new Map(), unplaced: [], totalNotes: 0, holdCapTicks: 0, lanes: new Map(), globalSysex: [], beatLines: [], performers: [], accompaniment };
   }
   const { staves, unplaced } = buildStaves(score, toAssignMap(assignments), router);
   let totalNotes = 0, earliestTick = Infinity;
@@ -242,7 +245,7 @@ export function buildPlan(score, assignments, router) {
   const slots = [...new Set([...staves.values()].filter((s) => s.kind === 'human' && s.notes.length).map((s) => s.slot))].sort((a, b) => slotOrder(a) - slotOrder(b));
   const holdCapTicks = holdCapTicksFor(score);
   return {
-    staves, unplaced, totalNotes, holdCapTicks, lanes, globalSysex,
+    staves, unplaced, totalNotes, holdCapTicks, lanes, globalSysex, beatLines: beatLines(score).lines,
     performers: slots.map((slot) => buildPerformer(score, staves, slot, controls, earliestTick, holdCapTicks)),
     accompaniment: buildAccompaniment(score, staves, controls),
   };
