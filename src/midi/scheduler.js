@@ -732,17 +732,45 @@ export class Scheduler {
   viewState() {
     const E = this._ensemble;
     return {
-      playing: this._playing, clockMs: this._clockMs, positionTicks: this.getPositionTicks(), rate: this.playbackRate, leaderSlot: E.leader?.slot ?? null,
+      playing: this._playing, clockMs: this._clockMs, positionTicks: this.getPositionTicks(), positionSec: this._score ? this._secOf(this.getPositionTicks()) : 0,
+      rate: this.playbackRate, leaderSlot: E.leader?.slot ?? null,
       performers: this._performers.filter((p) => p.slot !== null).map((p) => {
         const n = p.plan.driverSegs.length, from = p.groupEnd;
         const to = from < n ? this._groupEnd(p, from, p.tempo.playbackRate, p.lastSource) : from;
         return {
           slot: p.slot, mode: p.mode, setting: p.modeSetting, suggestion: p.suggestion, status: p.status, state: this._stateOf(p),
           isLeader: p === E.leader, rate: p.tempo.playbackRate, cursor: p.cursor, next: { from, to, ticks: p.plan.driverTicks[from] ?? null }, credit: p.credit?.kind ?? null,
-          intensity: p.intensity, expression: p.expression, gain: p.gain.value,
+          intensity: p.intensity, expression: p.expression, expressionSource: p.expressionFromCamera ? 'camera' : 'press', gain: p.gain.value,
         };
       }),
     };
+  }
+
+  /**
+   * 畫樂譜用的靜態資料（載入、改指派時才變，結果快取到下一次重建計畫）：每位演奏者一條，他的音（起音秒、結尾秒、音高、屬於第幾個起音）、
+   * 每個起音的秒數與拍子模式「按下去」對應的秒數（拍線），以及全曲拍線的秒數與音高範圍。version 每次重建 +1，畫面靠它知道要不要重算版面。
+   */
+  scoreView() {
+    if (this._scoreViewCache?.plan === this._plan) return this._scoreViewCache.view;
+    const sec = (t) => this._secOf(t);
+    const lanes = this._performers.filter((p) => p.slot !== null).map((p) => {
+      const segs = p.plan.driverSegs, n = segs.reduce((a, s) => a + s.items.length, 0);
+      const start = new Float64Array(n), end = new Float64Array(n), pitch = new Uint8Array(n), seg = new Uint32Array(n);
+      let k = 0, lo = 127, hi = 0;
+      segs.forEach((s, j) => {
+        for (const { note } of s.items) {
+          start[k] = sec(note.startTick); end[k] = sec(note.endTick); pitch[k] = note.midiNote; seg[k] = j; k++;
+          if (note.midiNote < lo) lo = note.midiNote; if (note.midiNote > hi) hi = note.midiNote;
+        }
+      });
+      return {
+        slot: p.slot, start, end, pitch, seg, lo: Math.min(lo, hi), hi: Math.max(lo, hi),
+        onsetSec: Float64Array.from(p.plan.driverTicks, sec), pressSec: Float64Array.from(p.plan.driverTicks, (t, j) => sec(Math.min(p.plan.unitLine[j] ?? t, t))),
+      };
+    });
+    const view = { version: (this._scoreViewCache?.view.version ?? 0) + 1, lanes, beatSec: Float64Array.from(this._plan.beatLines ?? [], sec) };
+    this._scoreViewCache = { plan: this._plan, view };
+    return view;
   }
 
   // 給演奏者看的狀態（見 viewState()）

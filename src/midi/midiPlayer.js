@@ -139,6 +139,7 @@ export function setPerformerMode(slot, setting) {
 // 給畫面（演奏者狀態列、樂譜視覺化）的輕量狀態，見 scheduler.js 的 viewState()
 export const performerView = () => synth.scheduler.viewState();
 export const scoreOf = () => (synth.isLoaded() ? playerStore.state.score : null);
+export const scoreStatic = () => (synth.isLoaded() ? synth.scheduler.scoreView() : null);
 // 訂閱排程器的演奏事件（mode、release…，見 scheduler.js 的 PerformanceEvents），回傳取消訂閱的函式
 export const onPerformanceEvent = (type, fn) => synth.scheduler.events.on(type, fn);
 // 畫面上的演奏資訊（狀態列、樂譜）該不該顯示：演奏模式、播過了而且還沒換歌

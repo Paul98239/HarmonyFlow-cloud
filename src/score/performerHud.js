@@ -38,11 +38,13 @@ export function startPerformerHud({ getView, isActive, subscribeMode }) {
     const el = document.createElement('div');
     el.className = 'hud-chip';
     el.style.setProperty('--hud-color', slotColor(slot));
-    const who = document.createElement('div'); who.className = 'hud-who'; who.textContent = slotName(slot);
-    const mode = document.createElement('div'); mode.className = 'hud-mode';
+    const line = document.createElement('div'); line.className = 'hud-line';
+    const who = document.createElement('span'); who.className = 'hud-who'; who.textContent = slotName(slot);
+    const mode = document.createElement('span'); mode.className = 'hud-mode';
+    line.append(who, mode);
     const state = document.createElement('div'); state.className = 'hud-state';
     const tip = document.createElement('div'); tip.className = 'hud-tip';
-    el.append(who, mode, state, tip);
+    el.append(line, state, tip);
     c = { el, mode, state, tip, key: '' };
     chips.set(slot, c);
     return c;
@@ -53,8 +55,7 @@ export function startPerformerHud({ getView, isActive, subscribeMode }) {
     let view = null;
     try { view = active ? getView() : null; } catch { view = null; }
     const performers = view?.performers ?? [];
-    root.hidden = !active || performers.length === 0;
-    if (root.hidden) return;
+    if (!active || performers.length === 0) return;   // 面板的顯示與否由 scoreView.js 決定
     const now = performance.now();
     const seen = new Set();
     for (const p of performers) {
@@ -75,7 +76,7 @@ export function startPerformerHud({ getView, isActive, subscribeMode }) {
         c.tip.textContent = tip;
         c.el.dataset.state = p.state;
       }
-      if (c.el.parentNode !== root) root.append(c.el);
+      if (root.children[performers.indexOf(p)] !== c.el) root.insertBefore(c.el, root.children[performers.indexOf(p)] ?? null);   // 跟樂譜的條同一個順序
     }
     for (const [slot, c] of chips) if (!seen.has(slot)) { c.el.remove(); chips.delete(slot); }
   };

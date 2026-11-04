@@ -580,26 +580,32 @@ body, html {
 /* 演奏模式下拉：跟指派下拉同一種外觀，沒有指派時淡掉（.player-input:disabled） */
 .score-part-mode { flex-shrink: 0; width: auto; min-width: 5.5em; }
 
-/* 演奏者狀態列（index.html 的 #performer-hud，src/score/performerHud.js 寫內容）：舞台底部置中一排，每位演奏者一格；不吃點擊（不擋到任何東西） */
-.performer-hud {
-  position: absolute; left: 50%; bottom: 1.2em; transform: translateX(-50%); z-index: 3;
-  display: flex; flex-wrap: wrap; justify-content: center; gap: 0.6em; max-width: 96%;
-  pointer-events: none;
+/* 樂譜面板（index.html 的 #score-panel）：舞台底部一整排，每位演奏者一條；左邊狀態（#performer-hud）、右邊樂譜（#score-canvas），兩邊的條高一樣（--lane-h）。
+   不吃點擊（不擋到任何東西）。條高：每條最多 4.4em，人多時整個面板不超過舞台高度的 42%（左右兩邊都把高度平均分給每一條）。 */
+.score-panel {
+  --lanes: 1;
+  position: absolute; left: 1.5%; right: 1.5%; bottom: 1.2%; z-index: 3;
+  display: flex; gap: 0.5em; pointer-events: none;
+  height: min(calc(4.4em * var(--lanes)), 42%);
 }
-.performer-hud[hidden] { display: none; }
+.score-panel[hidden] { display: none; }
+.performer-hud { display: flex; flex-direction: column; width: 15.5em; flex-shrink: 0; }
+.score-canvas { flex: 1 1 auto; min-width: 0; height: 100%; display: block; }
 .hud-chip {
-  display: flex; flex-direction: column; align-items: center; gap: 0.15em;
-  padding: 0.45em 0.9em; border-radius: var(--radius-sm);
+  flex: 1 1 0; min-height: 0; box-sizing: border-box;
+  display: flex; flex-direction: column; justify-content: center; gap: 0.05em;
+  padding: 0.2em 0.6em; border-radius: var(--radius-sm);
   background: rgba(0, 0, 0, 0.72); border: 2px solid var(--hud-color, var(--border));
-  color: var(--text); font-size: 1.05em; line-height: 1.25; min-width: 8em; text-align: center;
+  color: var(--text); font-size: 0.95em; line-height: 1.2; overflow: hidden;
 }
+.hud-chip .hud-line { display: flex; gap: 0.5em; align-items: baseline; white-space: nowrap; }
 .hud-chip .hud-who { font-weight: 800; color: var(--hud-color, var(--text)); }
-.hud-chip .hud-mode { font-size: 0.85em; opacity: 0.85; }
-.hud-chip .hud-state { font-weight: 700; }
+.hud-chip .hud-mode { font-size: 0.82em; opacity: 0.85; }
+.hud-chip .hud-state { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hud-chip[data-state="behind"] .hud-state { color: #ffb347; }
 .hud-chip[data-state="substitute"] .hud-state { color: #ff8080; }
 .hud-chip[data-state="resting"] .hud-state, .hud-chip[data-state="waiting"] .hud-state { color: #9ad; }
-.hud-chip .hud-tip { font-size: 0.8em; color: #ffe08a; max-width: 16em; }
+.hud-chip .hud-tip { font-size: 0.75em; color: #ffe08a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hud-chip .hud-tip:empty { display: none; }
 
 /* 跑馬燈（.mq）：文字超出欄位寬度時頭尾相連 loop，放得下就一動不動。

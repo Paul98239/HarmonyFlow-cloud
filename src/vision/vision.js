@@ -396,29 +396,47 @@ const ARM_JOINTS = [MP_LEFT_SHOULDER, MP_RIGHT_SHOULDER, MP_LEFT_ELBOW, MP_RIGHT
 // 臉部只標關鍵五官：雙眼（2/5）、鼻子（0）各畫一個獨立節點、不連線；嘴巴兩節點（9/10）加上虛擬下巴節點（virtualChinPoint()）連成倒三角形。
 const MOUTH_PAIR = [9, 10];
 
-// 情緒外接框：框住這個人上半身的節點（expression.js 的 box），框往外留白的寬度、線的粗細與亮度跟著表情 energy 放大縮小。
-// 在鏡像轉換之內畫（座標跟骨架一樣是正規化座標）。
-function drawEmotionBox(track, color, W, H) {
-  const ex = expressionTrackers[track.slot];
-  const b = ex?.box;
-  if (!b) return;
-  const e = ex.energy;
-  const sc = track.scale * W;                       // 這個人的尺度（像素）
-  const pad = sc * (0.15 + 0.55 * e);               // 越有活力框越大
-  const x = b.x0 * W - pad, y = b.y0 * H - pad, w = (b.x1 - b.x0) * W + 2 * pad, h = (b.y1 - b.y0) * H + 2 * pad;
-  const r = Math.min(w, h) * 0.12;
-  ctx2d.save();
-  ctx2d.globalAlpha = 0.25 + 0.55 * e;
-  ctx2d.strokeStyle = color;
-  ctx2d.lineWidth = 1.5 + 4 * e;
-  ctx2d.beginPath();
-  if (ctx2d.roundRect) ctx2d.roundRect(x, y, w, h, r); else ctx2d.rect(x, y, w, h);   // roundRect：Firefox 112／Safari 16 之前沒有
-  ctx2d.stroke();
-  ctx2d.restore();
+// ─── 骨架繪製（裝飾）────────────────────────────────────────────────────────────
+// 每個人：骨頭先畫一層寬而淡的光暈、再畫細的實線（不用 shadowBlur：那是逐像素模糊，很貴）；粗細依這個人在畫面上的大小（尺度）縮放；
+// 手腕是兩顆「手球」，大小跟著他上一下的力道，揮中的那一刻往外擴一圈光環；頭上一圈光暈；外面一個情緒框（四個角的括號＋很淡的底色），
+// 框往外留白、光暈的寬度與亮度都跟著表情 energy 變。一個人約十次繪圖呼叫（__skeletonStats() 量每幀的耗時）。
+const FLASH_MS = 380;                       // 揮中時手的光環持續多久
+const triggerFlash = [];                    // 槽位 → { at, hand: 'left'|'right'|'both', intensity }
+export const skeletonStats = { frames: 0, totalMs: 0, maxMs: 0 };
+const hexRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+const rgbaOf = (rgb, a) => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+
+// 這一幀有哪些槽位揮中了（gesture.frame 的「這一幀算數的觸發是哪隻手」），記下光環的起點
+function noteTriggers(frameRows, intensityBySlot, ts) {
+  for (const row of frameRows) {
+    const [id, , , , , , hand] = row;
+    if (hand) triggerFlash[id - 1] = { at: ts, hand, intensity: intensityBySlot?.[id] ?? 0.5 };
+  }
 }
 
-// 2D 覆蓋層繪製骨架：依鎖定槽位上色，同一人跨幀顏色不變。
-function renderSkeletonOverlay(activeTracks) {
+// 情緒外接框：框住這個人上半身的節點（expression.js 的 box），框往外留白、線的粗細與亮度跟著表情 energy 放大縮小。在鏡像轉換之內畫（座標跟骨架一樣是正規化座標）。
+function drawEmotionBox(track, rgb, W, H, e) {
+  const b = expressionTrackers[track.slot]?.box;
+  if (!b) return;
+  const sc = track.scale * W;
+  const pad = sc * (0.15 + 0.55 * e);
+  const x = b.x0 * W - pad, y = b.y0 * H - pad, w = (b.x1 - b.x0) * W + 2 * pad, h = (b.y1 - b.y0) * H + 2 * pad;
+  ctx2d.fillStyle = rgbaOf(rgb, 0.02 + 0.045 * e);
+  ctx2d.fillRect(x, y, w, h);
+  const c = Math.min(w, h) * 0.2;
+  ctx2d.strokeStyle = rgbaOf(rgb, 0.35 + 0.55 * e);
+  ctx2d.lineWidth = 1.5 + 4 * e;
+  ctx2d.lineCap = 'round';
+  const corners = new Path2D();
+  for (const [cx, cy, dx, dy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]]) {
+    corners.moveTo(cx + dx * c, cy); corners.lineTo(cx, cy); corners.lineTo(cx, cy + dy * c);
+  }
+  ctx2d.stroke(corners);
+}
+
+// 2D 覆蓋層繪製骨架：依鎖定槽位上色，同一人跨幀顏色不變。nowMs＝這一幀的時刻（揮中光環的進度）。
+function renderSkeletonOverlay(activeTracks, nowMs) {
+  const t0 = performance.now();
   const W = overlayCanvas.width;
   const H = overlayCanvas.height;
 
@@ -428,15 +446,19 @@ function renderSkeletonOverlay(activeTracks) {
   ctx2d.save();
   ctx2d.translate(W, 0);
   ctx2d.scale(-1, 1); // 水平鏡像（與 WebGL shader 一致）
+  ctx2d.lineJoin = 'round';
 
   for (const track of activeTracks) {
-    const color = POSE_COLORS[track.slot % POSE_COLORS.length];
-    drawEmotionBox(track, color, W, H);
+    const color = POSE_COLORS[track.slot % POSE_COLORS.length], rgb = hexRgb(color);
+    const e = expressionTrackers[track.slot]?.energy ?? 0.5;
+    drawEmotionBox(track, rgb, W, H, e);
 
-    // 低可見度（遮擋/猜測）的關節不繪製。visible 由 tracking.js 算好（可見度先 EMA 平滑、再套遲滯門檻），這裡不自己比門檻，否則邊緣關節會逐幀閃爍。骨架累積成 Path2D 後一次畫完，不用 DrawingUtils 逐條逐點畫。
+    // 低可見度（遮擋/猜測）的關節不繪製。visible 由 tracking.js 算好（可見度先 EMA 平滑、再套遲滯門檻），這裡不自己比門檻，否則邊緣關節會逐幀閃爍。
     const lm = track.smoothed;
     const ls = lm[MP_LEFT_SHOULDER], rs = lm[MP_RIGHT_SHOULDER];
     const shoulderWidth = Math.hypot(ls.x - rs.x, (ls.y - rs.y) * track.aspect);
+    const sc = Math.max(20, track.scale * W);                 // 這個人的大小（像素）
+    const core = Math.max(BONE_WIDTH, sc * 0.035);
     const neck = virtualNeckPoint(lm);
     const chin = virtualChinPoint(lm, shoulderWidth, track.aspect);
 
@@ -457,12 +479,27 @@ function renderSkeletonOverlay(activeTracks) {
       bones.moveTo(mRight.x * W, mRight.y * H); bones.lineTo(chin.x * W, chin.y * H);
       bones.moveTo(chin.x * W, chin.y * H); bones.lineTo(mLeft.x * W, mLeft.y * H);
     }
-    ctx2d.strokeStyle = color;
-    ctx2d.lineWidth = BONE_WIDTH;
+    ctx2d.lineCap = 'round';
+    ctx2d.strokeStyle = rgbaOf(rgb, 0.16 + 0.26 * e);         // 光暈：越有活力越寬越亮
+    ctx2d.lineWidth = core * (2.6 + 2.4 * e);
     ctx2d.stroke(bones);
+    ctx2d.strokeStyle = color;
+    ctx2d.lineWidth = core;
+    ctx2d.stroke(bones);
+
+    // 頭的光暈：鼻子為中心、約半個肩寬
+    const nose = lm[0];
+    if (nose && (nose.visible ?? true)) {
+      ctx2d.beginPath();
+      ctx2d.arc(nose.x * W, nose.y * H, sc * 0.42, 0, TAU);
+      ctx2d.strokeStyle = rgbaOf(rgb, 0.25 + 0.35 * e);
+      ctx2d.lineWidth = core * 0.8;
+      ctx2d.stroke();
+    }
 
     // 關節點：手臂鏈（含手腕與手掌三點）、脖子、下巴；雙眼與鼻子各畫一個獨立節點、不連線。
     const joints = new Path2D();
+    const jr = Math.max(JOINT_RADIUS, core * 0.9);
     const addJoint = (x, y, radius) => {
       // arc 從角度 0（圓的右端）起筆，先 moveTo 過去，否則會從上一個圓拉一條線過來
       joints.moveTo(x + radius, y);
@@ -472,14 +509,36 @@ function renderSkeletonOverlay(activeTracks) {
     for (const i of [...ARM_JOINTS, 0, 2, 5, MOUTH_PAIR[0], MOUTH_PAIR[1]]) {
       const p = lm[i];
       if (!(p.visible ?? true)) continue;
-      addJoint(p.x * W, p.y * H, JOINT_RADIUS);
+      addJoint(p.x * W, p.y * H, jr);
     }
-    if (neck) addJoint(neck.x * W, neck.y * H, JOINT_RADIUS);
-    if (chin) addJoint(chin.x * W, chin.y * H, JOINT_RADIUS);
+    if (neck) addJoint(neck.x * W, neck.y * H, jr);
+    if (chin) addJoint(chin.x * W, chin.y * H, jr);
     ctx2d.fillStyle = color;
     ctx2d.fill(joints);
-    ctx2d.lineWidth = 1;
-    ctx2d.stroke(joints);
+
+    // 手球：大小跟著上一下的力道；揮中的那一刻往外擴一圈光環
+    const flash = triggerFlash[track.slot];
+    const k = flash ? Math.max(0, 1 - (nowMs - flash.at) / FLASH_MS) : 0;
+    const hr = sc * (0.07 + 0.07 * (flash?.intensity ?? 0.5));
+    for (const [idx, hand] of [[MP_LEFT_WRIST, 'left'], [MP_RIGHT_WRIST, 'right']]) {
+      const p = lm[idx];
+      if (!(p.visible ?? true)) continue;
+      const x = p.x * W, y = p.y * H;
+      ctx2d.beginPath();
+      ctx2d.arc(x, y, hr, 0, TAU);
+      ctx2d.fillStyle = rgbaOf(rgb, 0.22 + 0.25 * e + 0.4 * k);
+      ctx2d.fill();
+      ctx2d.lineWidth = core * 0.7;
+      ctx2d.strokeStyle = '#fff';
+      ctx2d.stroke();
+      if (k > 0 && (flash.hand === hand || flash.hand === 'both')) {
+        ctx2d.beginPath();
+        ctx2d.arc(x, y, hr * (1.3 + 2.2 * (1 - k)), 0, TAU);
+        ctx2d.strokeStyle = rgbaOf(rgb, 0.9 * k);
+        ctx2d.lineWidth = core * (1 + 1.5 * k);
+        ctx2d.stroke();
+      }
+    }
   }
 
   ctx2d.restore();
@@ -505,7 +564,7 @@ function renderSkeletonOverlay(activeTracks) {
     const headTopOffsetPx = Math.max(fontSizePx * 1.3, shoulderWidthPx * 0.7); // 眼睛到頭頂的估計距離
 
     const sx = (1 - anchor.x) * W;                  // 水平鏡像
-    const sy = anchor.y * H - headTopOffsetPx / 2;   // 眼睛與頭頂的中點
+    const sy = Math.max(fontSizePx + 2, anchor.y * H - headTopOffsetPx / 2);   // 眼睛與頭頂的中點；頭頂在畫面外時貼著上緣，不被切掉
 
     ctx2d.font = `bold ${fontSizePx.toFixed(0)}px Consolas, monospace`;
     ctx2d.lineWidth = Math.max(3, fontSizePx * 0.12);
@@ -517,6 +576,8 @@ function renderSkeletonOverlay(activeTracks) {
   }
 
   ctx2d.restore();
+  const ms = performance.now() - t0;
+  skeletonStats.frames++; skeletonStats.totalMs += ms; if (ms > skeletonStats.maxMs) skeletonStats.maxMs = ms;
 }
 
 // rVFC 回呼帶 (now, metadata)，rAF 降級路徑只有 now：metadata.captureTime＝攝影機拍下這張的時刻，用來量「拍下→送出」與「拍下→結果進主執行緒」。
@@ -623,7 +684,8 @@ function runPipeline(ts, startMs, rawPoses, detectMs, captureLagMs, detectorRan,
   renderVideoGL(videoSource);
 
   // ▶ 2D 覆蓋層繪製骨架（漏偵測一兩幀的人用最後一次的骨架撐住，見 tracking.js 的 getDrawableTracks）
-  renderSkeletonOverlay(tracker.getDrawableTracks(ts));
+  noteTriggers(gesture.frame, gesture.arcIntensityBySlot, ts);
+  renderSkeletonOverlay(tracker.getDrawableTracks(ts), ts);
 
   recordFrame(ts, startMs, detectMs, rawPoses.length, detections, activeTracks, gesture.frame, captureLagMs, detectorRan, resultLagMs);
   consecutiveFrameErrors = 0;

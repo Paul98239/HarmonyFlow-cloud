@@ -1,0 +1,123 @@
+// scoreView.js — 樂譜視覺化（index.html 的 #score-panel／#score-canvas）：每位演奏者一條（他的顏色），他自己的音從右邊往「現在」那條線流過來，
+// 下一下會放出的音框起來、頭上一顆大圓點（拍子模式是下一拍的拍線）；放過的音變暗；落後時圓點閃橘色、代打中整條泛紅、休息中泛藍。左邊的文字是 performerHud.js。
+//
+// 任何 MIDI 都能畫：每條的音在載入時排好（scheduler.js 的 scoreView()，依起音排序），每一幀只用二分搜尋找畫面內的那一段；音高範圍依這個聲部自己的最低到最高音縮放；
+// 打擊、和弦、很密的快音都只是長方形。主執行緒負擔：一張 canvas、最多 30fps、只在演奏中畫、不用陰影與濾鏡；每幀的耗時記在 stats（__scoreViewStats()）。
+
+import { slotColor } from './palette.js';
+
+const FPS = 30;
+const PAST_SEC = 0.8;        // 「現在」線左邊顯示多久之前（真實秒）
+const FUTURE_SEC = 5;        // 右邊顯示多久之後（真實秒）
+const NOW_X = 0.14;          // 「現在」線在寬度的哪裡
+
+const lowerBound = (a, x) => { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < x) lo = m + 1; else hi = m; } return lo; };
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+const rgba = (rgb, a) => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+
+export const stats = { frames: 0, totalMs: 0, maxMs: 0, reset() { this.frames = 0; this.totalMs = 0; this.maxMs = 0; } };
+
+/**
+ * @param {{ getView: () => object, getStatic: () => object|null, isActive: () => boolean }} deps
+ *   getView＝scheduler.viewState()、getStatic＝scheduler.scoreView()、isActive＝要不要顯示（演奏中或暫停中）
+ */
+export function startScoreView({ getView, getStatic, isActive }) {
+  const panel = document.getElementById('score-panel');
+  const canvas = document.getElementById('score-canvas');
+  if (!panel || !canvas) return;
+  const ctx = canvas.getContext('2d');
+  let lastDraw = 0, lanesShown = -1, size = { w: 0, h: 0, dpr: 1 };
+
+  const resize = () => {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (w !== canvas.width || h !== canvas.height) { canvas.width = w; canvas.height = h; }
+    size = { w, h, dpr };
+  };
+  new ResizeObserver(resize).observe(canvas);
+
+  const frame = (now) => {
+    requestAnimationFrame(frame);
+    if (now - lastDraw < 1000 / FPS - 2) return;
+    lastDraw = now;
+    let view = null, stat = null;
+    const active = isActive();
+    if (active) { try { view = getView(); stat = getStatic(); } catch { view = null; } }
+    const n = view?.performers.length ?? 0;
+    const show = active && n > 0 && !!stat;
+    if (panel.hidden === show) panel.hidden = !show;
+    if (!show) return;
+    if (n !== lanesShown) { lanesShown = n; panel.style.setProperty('--lanes', String(n)); resize(); }
+    const t0 = performance.now();
+    draw(ctx, size, view, stat, now);
+    const ms = performance.now() - t0;
+    stats.frames++; stats.totalMs += ms; if (ms > stats.maxMs) stats.maxMs = ms;
+  };
+  requestAnimationFrame(frame);
+}
+
+function draw(ctx, { w: W, h: H, dpr }, view, stat, nowMs) {
+  ctx.clearRect(0, 0, W, H);
+  const lanes = view.performers, n = lanes.length, laneH = H / n;
+  const rate = view.rate > 0 ? view.rate : 1, pos = view.positionSec;
+  const nowX = Math.round(W * NOW_X), pxPerScoreSec = (W - nowX) / (FUTURE_SEC * rate);
+  const xOf = (sec) => nowX + (sec - pos) * pxPerScoreSec;
+  const visLo = pos - PAST_SEC * rate, visHi = pos + FUTURE_SEC * rate;
+  const byslot = new Map(stat.lanes.map((l) => [l.slot, l]));
+  const pulse = 0.5 + 0.5 * Math.sin(nowMs / 140);
+  for (let i = 0; i < n; i++) {
+    const v = lanes[i], L = byslot.get(v.slot);
+    if (!L) continue;
+    const rgb = hexToRgb(slotColor(v.slot));
+    const y0 = Math.round(i * laneH) + 2 * dpr, lh = Math.round(laneH) - 4 * dpr;
+    if (lh < 8 * dpr) continue;   // 版面還沒量好（剛顯示、還沒 resize）時條高可能是 0 或負的
+    // 底色：代打中泛紅、落後泛橘、休息／等待泛藍
+    ctx.fillStyle = v.state === 'substitute' ? 'rgba(120,30,30,0.55)' : v.state === 'behind' ? 'rgba(110,70,10,0.5)' : v.state === 'resting' || v.state === 'waiting' ? 'rgba(20,40,70,0.5)' : 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, y0, W, lh);
+    ctx.strokeStyle = rgba(rgb, v.isLeader ? 0.9 : 0.45);
+    ctx.lineWidth = (v.isLeader ? 2 : 1) * dpr;
+    ctx.strokeRect(0.5, y0 + 0.5, W - 1, lh - 1);
+    // 拍線（拍子模式的人看得清楚一點）
+    const beats = stat.beatSec;
+    ctx.fillStyle = v.mode === 'beat' ? rgba(rgb, 0.35) : 'rgba(255,255,255,0.08)';
+    for (let b = lowerBound(beats, visLo); b < beats.length && beats[b] <= visHi; b++) ctx.fillRect(Math.round(xOf(beats[b])), y0, Math.max(1, dpr), lh);
+    // 音：音高縮放到這條的高度
+    const pad = 5 * dpr, inner = lh - 2 * pad, range = Math.max(6, L.hi - L.lo);
+    const barH = Math.max(3 * dpr, Math.min(12 * dpr, inner / (range + 1)));
+    const yOf = (p) => y0 + pad + (1 - (p - L.lo) / range) * (inner - barH);
+    const from = v.next.from, to = v.next.to;
+    // 第一個可能看得到的音：起音在 visLo 之前、結尾還在畫面內的長音也要畫，往回多看最長 8 秒
+    for (let k = lowerBound(L.start, visLo - 8); k < L.start.length && L.start[k] <= visHi; k++) {
+      if (L.end[k] < visLo) continue;
+      const x = xOf(L.start[k]), x2 = Math.max(x + 3 * dpr, xOf(L.end[k]));
+      const seg = L.seg[k];
+      const played = seg < v.cursor && seg < from;
+      const isNext = seg >= from && seg < to;
+      ctx.fillStyle = played ? rgba(rgb, 0.22) : isNext ? rgba(rgb, 1) : rgba(rgb, 0.6);
+      const y = yOf(L.pitch[k]);
+      ctx.fillRect(x, y, x2 - x, barH);
+      if (isNext) { ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = dpr; ctx.strokeRect(x - 0.5, y - 0.5, x2 - x + 1, barH + 1); }
+    }
+    // 下一下：一顆大圓點（拍子模式在拍線上），快到了或落後時放大閃動
+    if (from < L.onsetSec.length && v.state !== 'done') {
+      const at = v.mode === 'beat' ? L.pressSec[from] : L.onsetSec[from];
+      const x = Math.max(nowX, xOf(at)), dueIn = (at - pos) / rate;
+      const urgent = v.state === 'behind' || dueIn < 0.35;
+      const r = Math.max(2, (lh * 0.16) * (urgent ? 1 + 0.25 * pulse : 1));
+      const cy = y0 + lh * 0.24;
+      ctx.beginPath(); ctx.arc(x, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = v.state === 'behind' ? `rgba(255,170,60,${0.6 + 0.4 * pulse})` : v.state === 'substitute' ? 'rgba(255,128,128,0.7)' : rgba(rgb, 0.95);
+      ctx.fill();
+      ctx.lineWidth = 2 * dpr; ctx.strokeStyle = '#fff'; ctx.stroke();
+      // 從圓點到「現在」線的引導線：還要多久
+      if (x > nowX + r) { ctx.fillStyle = rgba(rgb, 0.35); ctx.fillRect(nowX, cy - dpr, x - r - nowX, 2 * dpr); }
+    }
+    // 「現在」線
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(nowX - dpr, y0, 2 * dpr, lh);
+  }
+}

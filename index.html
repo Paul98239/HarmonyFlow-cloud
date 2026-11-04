@@ -35,6 +35,7 @@
   <link rel="modulepreload" href="./src/midi/modeAdvisor.js">
   <link rel="modulepreload" href="./src/score/performerHud.js">
   <link rel="modulepreload" href="./src/score/palette.js">
+  <link rel="modulepreload" href="./src/score/scoreView.js">
   <link rel="modulepreload" href="./src/midi/midiApi.js">
   <link rel="modulepreload" href="./src/vision/vision.js">
   <link rel="modulepreload" href="./src/vision/tracking.js">
@@ -142,8 +143,12 @@
           <div id="stage-blackout"></div>
         </div>
         <div id="stage-hint" role="status" aria-live="polite" hidden></div>
-        <!-- 演奏者狀態列（src/score/performerHud.js）：每位演奏者一格——誰、目前的模式、演奏中／落後／代打中…、智能切換的建議。播放中才顯示。 -->
-        <div id="performer-hud" class="performer-hud" aria-live="polite" hidden></div>
+        <!-- 樂譜面板：每位演奏者一條（播放中才顯示）。左邊是狀態（src/score/performerHud.js：誰、目前的模式、演奏中／落後／代打中…、智能切換的建議），
+             右邊是他自己的音往「現在」線流過來、下一下要按的位置（src/score/scoreView.js）。兩邊的條數與順序相同、高度由 --lanes 決定。 -->
+        <div id="score-panel" class="score-panel" hidden>
+          <div id="performer-hud" class="performer-hud" aria-live="polite"></div>
+          <canvas id="score-canvas" class="score-canvas" aria-hidden="true"></canvas>
+        </div>
       </div>
     </div>
   </div>

@@ -113,7 +113,7 @@ SCENARIOS.gestureExpression = async ({ page, url, out }) => {
   const presses = await page.evaluate(() => window.__pressLog().presses.filter((p) => p.slot === 1));
   if (presses.length < 4) throw new Error(`揮了 7 秒只有 ${presses.length} 下觸發`);
   const v = await page.evaluate(() => window.__view().performers.find((p) => p.slot === 1));
-  if (Math.abs(v.expression - 0.5) < 0.02) throw new Error(`表情沒有從攝影機進來：${v.expression}`);
+  if (v.expressionSource !== 'camera') throw new Error(`表情沒有從攝影機進來：${v.expressionSource}`);
   if (Math.abs(v.intensity - 0.5) < 0.01) throw new Error(`揮手的力道沒有進來：${v.intensity}`);
   const inked = await page.evaluate(() => {
     const c = document.getElementById('overlay-canvas'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
@@ -127,4 +127,38 @@ SCENARIOS.gestureExpression = async ({ page, url, out }) => {
   await page.waitForTimeout(8000);
   const after = await page.evaluate(() => window.__view().performers.find((p) => p.slot === 1).expression);
   if (!(after < before - 0.08)) throw new Error(`動作變小變慢，表情 ${before.toFixed(2)} → ${after.toFixed(2)}`);
+};
+
+// 任何 MIDI 都畫得出來：測資庫每一首（含 SMPTE、未量化、弱起、不規則小節、鼓）載入、指派、播放，樂譜面板每一條都有畫東西
+SCENARIOS.scoreViewAllSongs = async ({ page, url, out }) => {
+  await boot(page, url);
+  const names = ['duet', 'fastRuns', 'pickup', 'irregular', 'unquantized', 'smpte', 'canonRests', 'quartet', 'pianoChords', 'drums', 'slowLong', 'solo'];
+  for (const name of names) {
+    await loadLocal(page, out, name);
+    const nParts = await page.locator('#scorePartList .score-part-id').count();
+    await assignPart(page, 0, 'kb');
+    if (nParts > 1) { await setPoseCount(page, 1); await page.waitForTimeout(300); await assignPart(page, 1, '1'); }
+    await closePanel(page);
+    await play(page);
+    await page.focus('body');
+    for (let i = 0; i < 3; i++) { await page.keyboard.press('KeyF'); await page.waitForTimeout(300); }
+    await page.waitForTimeout(400);
+    const r = await page.evaluate(() => {
+      const c = document.getElementById('score-canvas'), ctx = c.getContext('2d');
+      const lanes = Number(getComputedStyle(document.getElementById('score-panel')).getPropertyValue('--lanes'));
+      const h = c.height / lanes, inked = [];
+      for (let i = 0; i < lanes; i++) {
+        const d = ctx.getImageData(0, Math.floor(i * h), c.width, Math.floor(h)).data;
+        let n = 0; for (let k = 3; k < d.length; k += 4) if (d[k]) n++;
+        inked.push(n);
+      }
+      return { hidden: document.getElementById('score-panel').hidden, lanes, inked, chips: document.querySelectorAll('#performer-hud .hud-chip').length };
+    });
+    const expected = nParts > 1 ? 2 : 1;
+    if (r.hidden || r.lanes !== expected || r.chips !== expected) throw new Error(`${name}：面板 ${JSON.stringify(r)}`);
+    if (r.inked.some((n) => n < 2000)) throw new Error(`${name}：有一條幾乎沒畫 ${JSON.stringify(r.inked)}`);
+    await page.click('#btnPause');
+  }
+  const stats = await page.evaluate(() => window.__scoreViewStats());
+  if (!(stats.平均ms < 3)) throw new Error(`樂譜面板每幀平均 ${stats.平均ms}ms`);
 };
