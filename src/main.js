@@ -104,7 +104,7 @@ async function bootSystem() {
   // 觸發來源：鍵盤（槽位 'kb'）與揮手（槽位 1~4＝演奏者 ID）並存，都進同一個入口 triggerInput
   startKeyboardTrigger(midiPlayer.triggerInput, midiPlayer.KEYBOARD_SLOT, midiPlayer.liftInput);
   const onGesture = createGestureTrigger(midiPlayer.triggerInput);
-  setPerformanceStateListener((state) => { onGesture(state); midiPlayer.setPresentSlots(state.presentSlots); });
+  setPerformanceStateListener((state) => { onGesture(state); midiPlayer.setPresentSlots(state.presentSlots); midiPlayer.setExpressions(state.expressionBySlot); });
 
   startPerformerHud({ getView: midiPlayer.performerView, isActive: midiPlayer.isPerforming, subscribeMode: (fn) => midiPlayer.onPerformanceEvent('mode', fn) });
 

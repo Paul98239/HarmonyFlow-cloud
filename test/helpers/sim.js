@@ -178,7 +178,8 @@ export function scoreBot(slot, opts = {}) {
       sim.press(slot, { source, key: k });
       this.lastPressMs = sim.now;
       const after = this.group(sim);
-      if (after.lastHead !== null) lastPress = { ms: sim.now, sec: sim.score.midiTicksToSeconds(after.segments[after.lastHead].ticks), head: after.lastHead };
+      // 原點是他的動作時刻（收到的時刻減掉延遲），不然每一下都多晚一個延遲、越彈越拖
+      if (after.lastHead !== null) lastPress = { ms: sim.now - lagOf(slot), sec: sim.score.midiTicksToSeconds(after.segments[after.lastHead].ticks), head: after.lastHead };
       this.presses++;
       if (r() < extra) extraAt = sim.now + extraGapMs;
     },

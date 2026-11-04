@@ -77,3 +77,54 @@ SCENARIOS.modesUi = async ({ page, url, out }) => {
   if (kb.mode !== 'beat') throw new Error(`排程器的模式是 ${kb.mode}`);
   if (kb.cursor < 30) throw new Error(`按了 14 拍只放到第 ${kb.cursor} 個音（快音群沒有被補上）`);
 };
+
+import { installFakePose } from './fakePose.mjs';
+
+const humanVelocities = (page) => page.evaluate(() => window.__pressLog().events.filter((e) => e.type === 'noteOn' && e.kind === 'human').map((e) => e.velocity));
+
+// 鍵盤的按鍵位置改變力度（真的頁面、真的合成器）
+SCENARIOS.keyVelocity = async ({ page, url, out }) => {
+  await boot(page, url);
+  await loadLocal(page, out, 'duet');
+  await assignPart(page, 0, 'kb');
+  await closePanel(page);
+  await play(page);
+  await page.focus('body');
+  const tap = async (key, n) => { for (let i = 0; i < n; i++) { await page.keyboard.down(key); await page.waitForTimeout(200); await page.keyboard.up(key); await page.waitForTimeout(250); } };
+  await tap('KeyA', 4);
+  const soft = await humanVelocities(page);
+  await tap('Semicolon', 4);
+  const all = await humanVelocities(page);
+  const loud = all.slice(soft.length);
+  const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  if (!(avg(loud) > avg(soft) * 1.3)) throw new Error(`左邊 ${avg(soft).toFixed(0)}、右邊 ${avg(loud).toFixed(0)}`);
+};
+
+// 揮手（假的姿勢推論）：觸發、力道、表情（外接框）一路接到排程器，骨架與情緒框畫得出來
+SCENARIOS.gestureExpression = async ({ page, url, out }) => {
+  await installFakePose(page, [{ cx: 0.5, cy: 0.35, scale: 0.16, amp: 1.4, periodMs: 1250 }]);
+  await boot(page, url);
+  await setPoseCount(page, 1);
+  await loadLocal(page, out, 'duet');
+  await assignPart(page, 0, '1');
+  await closePanel(page);
+  await play(page);
+  await page.waitForTimeout(7000);
+  const presses = await page.evaluate(() => window.__pressLog().presses.filter((p) => p.slot === 1));
+  if (presses.length < 4) throw new Error(`揮了 7 秒只有 ${presses.length} 下觸發`);
+  const v = await page.evaluate(() => window.__view().performers.find((p) => p.slot === 1));
+  if (Math.abs(v.expression - 0.5) < 0.02) throw new Error(`表情沒有從攝影機進來：${v.expression}`);
+  if (Math.abs(v.intensity - 0.5) < 0.01) throw new Error(`揮手的力道沒有進來：${v.intensity}`);
+  const inked = await page.evaluate(() => {
+    const c = document.getElementById('overlay-canvas'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
+    return n;
+  });
+  if (inked < 500) throw new Error(`骨架／情緒框幾乎沒畫：${inked} 個像素`);
+  // 改成小而慢：表情下降
+  const before = v.expression;
+  await page.evaluate(() => window.__fakePose.set([{ cx: 0.5, cy: 0.35, scale: 0.16, amp: 0.3, periodMs: 2200 }]));
+  await page.waitForTimeout(8000);
+  const after = await page.evaluate(() => window.__view().performers.find((p) => p.slot === 1).expression);
+  if (!(after < before - 0.08)) throw new Error(`動作變小變慢，表情 ${before.toFixed(2)} → ${after.toFixed(2)}`);
+};

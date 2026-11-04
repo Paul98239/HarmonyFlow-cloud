@@ -1,4 +1,7 @@
 // keyboard.js — 鍵盤觸發：keydown／keyup 包成輸入事件交給呼叫端；按下後的發聲與時值都在排程器。
+// 力道：按鍵在鍵盤上從左到右的位置（左邊小聲、右邊大聲，空白鍵中性），見 src/midi/dynamics.js 的 keyIntensity()。
+
+import { keyIntensity } from '../midi/dynamics.js';
 
 // 用 event.code（實體鍵位）而非 event.key：不受輸入法、鍵盤配置與修飾鍵影響。只含美式鍵盤的字元鍵與空白鍵，
 // 刻意不含 Enter／Tab（會按下焦點按鈕、移動焦點）、數字鍵盤、方向鍵、功能鍵。
@@ -22,8 +25,8 @@ const isTyping = (el) => !!el && (el.isContentEditable || el.tagName === 'TEXTAR
 /**
  * 掛上 keydown／keyup 監聽；有效按鍵在 keydown 內同步呼叫 onInput（不經計時器，發聲才不會晚），之後那個鍵放開時呼叫 onLift。
  * eventTimeMs＝event.timeStamp、receivedMs＝handler 開始時的 performance.now()，同一時間原點，相減＝佇列等待。
- * key＝event.code（兩個回呼配對用）；slot 是這個鍵盤代表的演奏者槽位，由呼叫端決定。
- * @param {(input: { slot: number|string, source: string, key: string, eventTimeMs: number, receivedMs: number }) => void} onInput
+ * key＝event.code（兩個回呼配對用）；slot 是這個鍵盤代表的演奏者槽位，由呼叫端決定。intensity＝力道 0～1（按鍵左右位置）。
+ * @param {(input: { slot: number|string, source: string, key: string, intensity: number, eventTimeMs: number, receivedMs: number }) => void} onInput
  * @param {number|string} slot  這個鍵盤代表的演奏者槽位
  * @param {(input: { slot: number|string, source: string, key: string, eventTimeMs: number, receivedMs: number }) => void} [onLift]  鍵放開（或視窗失焦、分頁隱藏時補送）
  */
@@ -49,7 +52,7 @@ export function startKeyboardTrigger(onInput, slot, onLift) {
     inputDelays.push(receivedMs - e.timeStamp);
     if (inputDelays.length > INPUT_DELAY_MAX) inputDelays.shift();
     down.add(e.code);
-    onInput({ slot, source: 'keyboard', key: e.code, eventTimeMs: e.timeStamp, receivedMs });
+    onInput({ slot, source: 'keyboard', key: e.code, intensity: keyIntensity(e.code), eventTimeMs: e.timeStamp, receivedMs });
   });
 
   // Firefox 在空白鍵 keyup 才按下焦點按鈕，只擋 keydown 不夠

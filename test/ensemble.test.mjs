@@ -65,7 +65,7 @@ test('揮手的人離開鏡頭（在場名單）：一秒後由電腦代打，�
   sim.runToEnd();
   assert.deepEqual(violations(sim), []);
   assert.ok(g1.presses >= 6);
-  const back = sim.ofType('press').filter((e) => e.slot === 1 && e.simMs > 10000 && ['released', 'takeover'].includes(e.result));
+  const back = sim.ofType('press').filter((e) => e.slot === 1 && e.simMs > 10000 && ['released', 'takeover', 'ahead'].includes(e.result));   // ahead：揮手超前被鎖到只超前半拍，到點放出，也是在演奏
   assert.ok(back.length >= 3, '回來之後要能繼續演奏');
 });
 

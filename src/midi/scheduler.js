@@ -10,6 +10,7 @@
 
 import { summarizeMs, TempoFollower, minPressIntervalSec, maxGroupSpanSec, MUSICIAN_WINDOW_INTERVALS } from './tempo.js';
 import { ModeAdvisor, MODES } from './modeAdvisor.js';
+import { performerVelocity, ensembleVelocity, SmoothGain, PressExpression, SUBSTITUTE_GAIN, BEHIND_GAIN } from './dynamics.js';
 import { OutputRouter, portsFor, VoiceLedger, scaledMs, EPS_MS } from './voices.js';
 import { buildPlan, staffPools, sliceOfTick, switchesKit, stateEvents, emptyPerformerPlan, slotOrder } from './performancePlan.js';
 import { ChannelStateTracker, chaseEventsAt, DRUM_CHANNEL } from './midiParser.js';
@@ -125,7 +126,7 @@ export function eventLogSubscriber(events) {
   events.on('release', (e) => push({ type: 'release', group: e.group, index: e.index, ticks: e.ticks, clockMs: e.clockMs }));
   events.on('group', (e) => push({ type: 'group', group: e.group, index: e.index, merged: e.merged.map((m) => m.index), clockMs: e.clockMs }));
   events.on('autoRelease', (e) => push({ type: 'autoRelease', group: e.group, index: e.index, ticks: e.ticks, dueMs: e.dueMs, clockMs: e.clockMs }));
-  events.on('noteOn', (e) => push({ type: 'noteOn', noteId: e.noteId, staffId: e.staffId, kind: e.kind, atMs: e.timed ? Math.max(e.dueMs, e.clockMs) : e.clockMs }));
+  events.on('noteOn', (e) => push({ type: 'noteOn', noteId: e.noteId, staffId: e.staffId, kind: e.kind, atMs: e.timed ? Math.max(e.dueMs, e.clockMs) : e.clockMs, velocity: e.velocity }));
   events.on('noteOff', (e) => push({ type: 'noteOff', noteId: e.noteId, staffId: e.staffId, kind: e.kind, atMs: e.timed && Number.isFinite(e.offMs) ? Math.max(e.offMs, e.clockMs) : e.clockMs }));
   events.on('chase', (e) => push({ type: 'chase', group: e.group, ticks: e.ticks, chased: ids(e.chased), skipped: ids(e.skipped) }));
   events.on('leader', (e) => push({ type: 'leader', from: e.from, to: e.to, reason: e.reason, clockMs: e.clockMs }));
@@ -216,8 +217,8 @@ const BEAT_MODE_MAX_RATE = 1.6;   // 拍子模式的速度上限（檔案速度�
 const BEAT_GROUP_MAX_SEC = 1.6;
 const BEAT_HOLD_AHEAD = 0.6;
 const BEAT_DEBOUNCE_FLOOR = 0.9;  // 拍子模式：兩下之間至少隔「這一拍在速度上限下的長度」的這麼多（亂按最快也只到速度上限）      // 拍子模式：離下一拍的頭還超過這麼多拍的一下算「打拍子」（見 _triggerBody）   // 拍子模式：太快的拍合併時，一組最多跨這麼久（真實秒）
-// 電腦代打（第二段防呆）時他的聲部的力度倍率：小聲介入，維持合奏感但聽得出不是他在彈
-export const SUBSTITUTE_VELOCITY = 0.6;
+// 電腦代打（第二段防呆）時他的聲部的力度倍率：小聲介入，維持合奏感但聽得出不是他在彈（dynamics.js；平滑漸變過去）
+export const SUBSTITUTE_VELOCITY = SUBSTITUTE_GAIN;
 
 // 依他的模式設定速度追蹤（去抖方式、估速視窗、速度區間）
 function applyMode(p) {
@@ -273,6 +274,13 @@ function makePerformerState(index, plan, tempo = new TempoFollower(), setting = 
     jumpRecover: 0,
     lastPressSec: null,    // 他上一下被接受的按鍵對應的樂譜秒（_accept；拍子模式的估速與去抖從這裡算）
     headMotionMs: null,    // 他按下目前這一組的那一下的動作時刻（modeAdvisor 判斷「按在組內音上」用）
+    // 力度（dynamics.js）：intensity＝他最近一下的力道（0～1，0.5 中性）；expression＝他的表情（攝影機的外接框，或鍵盤手最近幾下的力道）；
+    // gain＝落拍／代打的平滑倍率。是設定兼即時狀態，重設時回到中性
+    intensity: 0.5,
+    expression: 0.5,
+    expressionFromCamera: false,
+    pressExpression: new PressExpression(),
+    gain: new SmoothGain(1),
   };
   applyMode(p);
   return p;
@@ -350,7 +358,10 @@ export class Scheduler {
       }
       const setting = this._modeSettings.get(plan.slot) ?? 'onset';
       const p = makePerformerState(i, plan, tempo, setting, setting === 'auto' ? (old?.mode ?? 'onset') : setting);
-      if (old) { p.lastTriggerMs = old.lastTriggerMs; p.absentSinceMs = old.absentSinceMs; }
+      if (old) {
+        p.lastTriggerMs = old.lastTriggerMs; p.absentSinceMs = old.absentSinceMs;
+        p.intensity = old.intensity; p.expression = old.expression; p.expressionFromCamera = old.expressionFromCamera; p.pressExpression = old.pressExpression;
+      }
       return p;
     });
     this._bySlot = new Map(this._performers.filter((p) => p.slot !== null).map((p) => [p.slot, p]));
@@ -540,6 +551,10 @@ export class Scheduler {
       p.jumpRecover = 0;
       p.lastPressSec = null;
       p.headMotionMs = null;
+      p.intensity = 0.5;
+      p.pressExpression = new PressExpression();
+      if (!p.expressionFromCamera) p.expression = 0.5;
+      p.gain = new SmoothGain(1);
       p.tempo.reset();
     }
     this._ensemble = makeEnsemble();
@@ -724,6 +739,7 @@ export class Scheduler {
         return {
           slot: p.slot, mode: p.mode, setting: p.modeSetting, suggestion: p.suggestion, status: p.status, state: this._stateOf(p),
           isLeader: p === E.leader, rate: p.tempo.playbackRate, cursor: p.cursor, next: { from, to, ticks: p.plan.driverTicks[from] ?? null }, credit: p.credit?.kind ?? null,
+          intensity: p.intensity, expression: p.expression, gain: p.gain.value,
         };
       }),
     };
@@ -1235,6 +1251,11 @@ export class Scheduler {
     const R = this._roster, motion = this._motionClock(ev, clock), isNew = !R.has(p.slot), cur = this._ensemble.leader;
     p.lastTriggerMs = motion;
     p.lastSource = ev.source ?? null;
+    // 這一下的力道（鍵盤的按鍵位置、揮手的幅度與速度；沒給就是中性）。沒有攝影機表情的人（鍵盤手），表情由最近幾下的力道平滑出來
+    if (Number.isFinite(ev.intensity)) {
+      p.intensity = Math.min(1, Math.max(0, ev.intensity));
+      if (!p.expressionFromCamera) p.expression = p.pressExpression.observe(p.intensity);
+    }
     this._admit(p, ev, motion);
     // 還沒有人帶頭：他先成為帶頭的人，這一下照帶頭的人處理（前奏、N2 早按）。已經有人帶頭：這一下先照不是帶頭的人處理（x、跳、鎖），再看要不要換人——
     // 先換的話，落後的人這一下會以帶頭的人的身分放他落後的起音，合奏停在原處等他、不會跳到合奏位置（規格「合奏」）
@@ -1748,10 +1769,31 @@ export class Scheduler {
     });
   }
 
-  // 這顆音的力度：原檔的力度；電腦代打中的演奏者的音小聲一點（SUBSTITUTE_VELOCITY，小聲介入）。
+  // 這顆音的力度（dynamics.js）：演奏者的音看他的模式、這一下的力道、他的表情與平滑倍率（電腦代打中漸變到 SUBSTITUTE_GAIN；
+  // 不是帶頭的人落拍時漸變到 BEHIND_GAIN，帶頭的人不會落拍——合奏跟著他）；電腦代打時力道當成中性（不是他按的）。伴奏跟著帶頭的人的表情。
   _velocityOf(staff, note, owner) {
-    if (staff.kind === 'human' && owner?.status === 'substitute') return Math.max(1, Math.round(note.velocity * SUBSTITUTE_VELOCITY));
-    return note.velocity;
+    if (staff.kind !== 'human' || !owner) return ensembleVelocity(note.velocity, this._ensemble.leader?.expression ?? 0.5);
+    const sub = owner.status === 'substitute';
+    const target = sub ? SUBSTITUTE_GAIN : owner !== this._ensemble.leader && this._isOffBeat(owner) ? BEHIND_GAIN : 1;
+    const gain = owner.gain.at(target, this._clockMs);
+    return performerVelocity(note.velocity, { mode: owner.mode, intensity: sub ? 0.5 : owner.intensity, expression: owner.expression, gain });
+  }
+
+  // 落拍：他上一下落後偏離／脫隊，或已經錯過起音
+  _isOffBeat(p) {
+    return ((p.zone === 'off' || p.zone === 'lost') && p.xMs !== null && p.xMs < 0) || this._missedCount(p) > 0;
+  }
+
+  /**
+   * 演奏者的表情（0～1，0.5 中性；src/vision/expression.js 的外接框）：他自己的音與（他帶頭時）伴奏的力度跟著它。
+   * 有攝影機表情的人不再用按鍵力道推算表情；傳 null 表示這個人現在沒有攝影機表情（離開鏡頭），回到用力道推算。
+   */
+  setExpression(slot, value) {
+    const p = this._bySlot.get(slot);
+    if (!p) return;
+    if (value === null || !Number.isFinite(value)) { p.expressionFromCamera = false; return; }
+    p.expressionFromCamera = true;
+    p.expression = Math.min(1, Math.max(0, value));
   }
 
   // 所有演奏者與合奏的 timed 佇列裡、時刻已到（≤ limitMs）的項目依 (時刻, 建批次順序) 合併送出：伴奏的音、組裡他的音、送電腦合成器的控制器、SysEx。

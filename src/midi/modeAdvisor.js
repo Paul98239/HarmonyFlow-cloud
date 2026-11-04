@@ -95,6 +95,8 @@ export class ModeAdvisor {
   }
 
   _verdict(mode) {
+    // 還沒按過任何一下的人（還沒開始、一直不在）沒有任何可以判斷的資料：不建議也不切（進入代打是因為他不在，不是不會）
+    if (!this.attempts.length) return null;
     // 亂按／連按
     const att = this.attempts.slice(-A.MASH_WINDOW);
     if (att.length >= A.MASH_MIN_ATTEMPTS && mode !== 'beat') {

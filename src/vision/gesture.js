@@ -32,6 +32,10 @@ export const DEFAULT_ARC_CONFIG = Object.freeze({
   // 起點那一幀手腕 presence（MediaPipe：點在畫面範圍內的機率）的下限：手在畫面外時模型猜出來的點也會湊出拋物線，真的揮手從畫面裡開始。
   // 2026-10-30 畫面下緣紀錄：擋掉搬筆電時被猜在畫面外的 4 下，代價是手超出畫面側邊的 2 下；0.5 擋到的搬筆電一樣是 4 下，側邊與近距的揮手多擋約 7 下（子專案 1 檢查報告 6.14）
   minStartPresence: 0.3,
+  // 力道（intensity，0～1）：這一下的深度（尺度單位）與下沉時的最大速度（尺度／秒）。站遠站近一樣（都以這個人的尺度為單位）；
+  // 主要跟他自己最近 intensityHistory 下比（動作天生小的人揮得比平常大就是大聲，不會永遠小聲），再混一點絕對值（完全不動的人不會被放大）。
+  intensityHistory: 8,
+  intensityRelWeight: 0.7,
 });
 
 /**
@@ -65,10 +69,34 @@ export class ArcDetector {
     this.lastTriggerTroughMs = null;   // 最近一次觸發的最低點時刻：揮手的「動作時刻」（排程器估速、比先後用）
     this.pending = null;        // 谷底在畫面下緣外、等手回來的拋物線 {troughY, troughMs, depthY, depthRatio, sinceMs}
     this._lastMs = null;
+    this._lastY = null;         // 上一幀的 y（下沉速度用）
+    this._maxSpeed = 0;         // 這一段下沉的最大速度（尺度／秒）
+    this.recentSpeeds = [];     // 最近幾次觸發的下沉速度（力道的個人基準）
+    this.recentIntensityDepths = [];   // 最近幾次觸發的深度（力道的個人基準；跟上膛用的 recentDepths 分開，兩者的歷史長度不同）
+    this.lastIntensity = 0.5;   // 最近一次觸發的力道
   }
 
-  _fire(troughY, troughMs, depthY, depthRatio) {
+  // 這一下的力道：跟他自己最近的揮法比（深度、速度各是平常的兩倍各 +0.3），再混一點絕對值；歷史不到 3 下時主要用絕對值
+  _intensity(depthRatio, speed) {
+    const c = this.cfg, med = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[s.length >> 1]; };
+    const abs = 0.5 * Math.min(1, Math.max(0, (depthRatio - 0.1) / 1.4)) + 0.5 * Math.min(1, Math.max(0, (speed - 0.4) / 5));
+    const n = this.recentIntensityDepths.length;
+    let value = abs;
+    if (n >= 1) {
+      const rd = depthRatio / Math.max(1e-3, med(this.recentIntensityDepths)), rs = speed / Math.max(1e-3, med(this.recentSpeeds));
+      const rel = Math.min(1, Math.max(0, 0.5 + 0.3 * (Math.log2(rd) + Math.log2(rs))));
+      const w = Math.min(1, n / 3) * c.intensityRelWeight;
+      value = (1 - w) * abs + w * rel;
+    }
+    this.recentIntensityDepths.push(depthRatio);
+    this.recentSpeeds.push(speed);
+    if (this.recentIntensityDepths.length > c.intensityHistory) { this.recentIntensityDepths.shift(); this.recentSpeeds.shift(); }
+    return value;
+  }
+
+  _fire(troughY, troughMs, depthY, depthRatio, speed = this._maxSpeed) {
     this.triggerSeq++;
+    this.lastIntensity = this._intensity(depthRatio, speed);
     this.lastTriggerTroughMs = troughMs;
     this.lastDepthY = depthY;
     this.rearmY = troughY - this.cfg.rearmRiseRatio * depthY;
@@ -98,7 +126,9 @@ export class ArcDetector {
       this.peakY = this.troughY = null;
       this.pending = null;
       this._lastMs = null;
-      return { triggerSeq: this.triggerSeq, troughMs: this.lastTriggerTroughMs };
+      this._lastY = null;
+      this._maxSpeed = 0;
+      return { triggerSeq: this.triggerSeq, troughMs: this.lastTriggerTroughMs, intensity: this.lastIntensity };
     }
 
     if (this._lastMs != null && nowMs - this._lastMs > this.cfg.staleMs) this.reset();
@@ -112,7 +142,7 @@ export class ArcDetector {
     const p = this.pending;
     if (p) {
       if ((p.troughY - y) * aspect >= this.cfg.outOfFrameRiseRatio * sw || y <= this.cfg.maxConfirmY) {
-        this._fire(p.troughY, p.troughMs, p.depthY, p.depthRatio);
+        this._fire(p.troughY, p.troughMs, p.depthY, p.depthRatio, p.speed);
         this.pending = null;
       } else if (captureMs - p.sinceMs > this.cfg.outOfFramePendingMs) {
         this.pending = null;
@@ -122,10 +152,16 @@ export class ArcDetector {
     if (this.peakY === null) {
       this.peakY = y; this.peakPresence = presence; this.troughY = y; this.troughMs = captureMs;
       this._minX = x; this._maxX = x;
-      return { triggerSeq: this.triggerSeq, troughMs: this.lastTriggerTroughMs };
+      return { triggerSeq: this.triggerSeq, troughMs: this.lastTriggerTroughMs, intensity: this.lastIntensity };
     }
 
     if (this.rearmY !== null && y <= this.rearmY) this.rearmY = null;
+    // 下沉速度（尺度／秒）：跟前一幀比，只在往下的時候記最大值
+    const prevY = this._lastY, prevMs = this._lastFrameMs;
+    this._lastY = y; this._lastFrameMs = captureMs;
+    if (prevY !== null && prevMs !== undefined && captureMs > prevMs && y > prevY) {
+      this._maxSpeed = Math.max(this._maxSpeed, ((y - prevY) * aspect) / sw / ((captureMs - prevMs) / 1000));
+    }
 
     if (y >= this.troughY) {
       this.troughY = y;
@@ -143,16 +179,17 @@ export class ArcDetector {
       if (shapeOk && armed && startInFrame) {
         const depthY = this.troughY - this.peakY, depthRatio = depth / sw;
         if (y <= this.cfg.maxConfirmY) this._fire(this.troughY, this.troughMs, depthY, depthRatio);
-        else if (this.peakY <= 1) this.pending = { troughY: this.troughY, troughMs: this.troughMs, depthY, depthRatio, sinceMs: captureMs };
+        else if (this.peakY <= 1) this.pending = { troughY: this.troughY, troughMs: this.troughMs, depthY, depthRatio, speed: this._maxSpeed, sinceMs: captureMs };
       }
       this.peakY = y; this.peakPresence = presence; this.troughY = y; this.troughMs = captureMs;
       this._minX = x; this._maxX = x;
+      this._maxSpeed = 0;
     } else {
       // 起點跟著更高的位置走，避免小雜訊被算進之後的深度
       if (y < this.peakY) { this.peakY = y; this.peakPresence = presence; }
     }
 
-    return { triggerSeq: this.triggerSeq, troughMs: this.lastTriggerTroughMs };
+    return { triggerSeq: this.triggerSeq, troughMs: this.lastTriggerTroughMs, intensity: this.lastIntensity };
   }
 }
 
@@ -186,6 +223,7 @@ function ensureSlot(slot) {
     lastHand: null,       // 上一次算數的觸發是哪隻手（兩手合併用）
     firedHand: null,      // 這一幀算數的觸發是哪隻手（'left'／'right'／'both'，沒有是 null；逐幀紀錄用）
     lastTroughMs: null,   // 最近一次算數的觸發的最低點時刻；跟 combinedSeq 一樣不歸零，接收端在計數變動時讀
+    lastIntensity: 0.5,   // 最近一次算數的觸發的力道（同上，接收端在計數變動時讀）
   };
   slotInactiveSinceMs[slot] = 0;
 }
@@ -232,6 +270,7 @@ function combineArcTriggers(state, arc) {
     state.lastHand = fired.length === 2 ? null : fired[0];   // 兩隻都用掉了，下一下不管哪隻手都是新的一下
     state.lastTroughMs = troughMs;
     state.combinedSeq = (state.combinedSeq || 0) + 1;
+    state.lastIntensity = Math.max(...fired.map((h) => arc[h].intensity ?? 0.5));   // 兩手一起揮取大的
   }
   return { triggerSeq: state.combinedSeq || 0 };
 }
@@ -249,6 +288,7 @@ function combineArcTriggers(state, arc) {
 export function updateGestures(activeTracks, slotCount, nowMs, captureMs = nowMs) {
   const arcTriggerSeqBySlot = {};
   const arcTroughMsBySlot = {};
+  const arcIntensityBySlot = {};
   const presentSlots = [];
   const frame = [];
   // 攤成「槽位 → track」查表；只處理 slotCount 個槽位，送出去的 map 不該帶永遠是空的槽位
@@ -280,12 +320,13 @@ export function updateGestures(activeTracks, slotCount, nowMs, captureMs = nowMs
     const combinedArc = combineArcTriggers(arcLastSeqBySlot[slot], arc);
     arcTriggerSeqBySlot[slot + 1] = combinedArc.triggerSeq;
     arcTroughMsBySlot[slot + 1] = arcLastSeqBySlot[slot].lastTroughMs;
+    arcIntensityBySlot[slot + 1] = arcLastSeqBySlot[slot].lastIntensity;
     if (track) {
       frame.push([slot + 1, arc.scale, arc.leftPoint?.x ?? null, arc.leftPoint?.y ?? null, arc.rightPoint?.x ?? null, arc.rightPoint?.y ?? null,
         arcLastSeqBySlot[slot].firedHand, combinedArc.triggerSeq]);
     }
   }
-  return { arcTriggerSeqBySlot, arcTroughMsBySlot, presentSlots, frame };
+  return { arcTriggerSeqBySlot, arcTroughMsBySlot, arcIntensityBySlot, presentSlots, frame };
 }
 
 // 所有槽位的手勢狀態歸位；combinedSeq 不歸零（見 resetSlotDetectors）。

@@ -5,6 +5,8 @@ import {
   MP_LEFT_WRIST, MP_RIGHT_WRIST, MP_LEFT_ELBOW, MP_RIGHT_ELBOW, MP_LEFT_SHOULDER, MP_RIGHT_SHOULDER,
   updateGestures, resetGestures,
 } from "./gesture.js";
+import { ExpressionTracker } from "./expression.js";
+import { POSE_COLORS } from "../score/palette.js";
 
 const CONFIG = {
   // 攝影機解析度與幀率的「上限」（getUserMedia 用 max 而非只給 ideal）：外接攝影機的原生模式常是 1080p60，真的拿到會讓每幀多搬四倍像素、rVFC 一秒觸發 60 次推論，多數機器跟不上；
@@ -35,7 +37,7 @@ export function warmPoseModel() {
 // landmarker 在 Worker（poseWorker.js）裡、只有一份：選了「現場人數」N 才建 numPoses=N 的那份，之後換人數用 setOptions() 原地更新；追蹤層的槽位數（＝ ID 上限）也設成 N（setPoseCount）。
 // 推論放在 Worker：detectForVideo 是同步的、會卡住呼叫它的執行緒（官方文件），放在主執行緒時按鍵、按鈕與伴奏排程都要排隊等它（見 docs/mediapipe-performance-reference.md）。
 
-const POSE_COLORS = ["#00FFFF", "#FF6B6B", "#51CF66", "#FFD43B"]; // 4 人的代表色彩（依鎖定槽位對應）
+// 4 人的代表色彩（依鎖定槽位對應）在 src/score/palette.js：狀態列與樂譜用同一組顏色
 const BONE_WIDTH = 2;      // 骨架連線寬度（px）
 const JOINT_RADIUS = 2;    // 關節圓點半徑（px）
 const TAU = Math.PI * 2;
@@ -47,10 +49,13 @@ const FRAME_ERROR_THRESHOLD = 90; // 連續幾幀處理失敗才判定為持續�
 
 // 誰匹配誰、新面孔何時鎖定空位，都在 tracking.js。let 而非 const：槽位數要跟「現場人數」走（applyPoseCount 會用新的 maxUsers 重建）。
 let tracker = new PersonTracker({ maxUsers: CONFIG.maxUsers });
+// 每個槽位的表情（外接框，src/vision/expression.js）：跟槽位走，換人數、重置 ID 時重來
+let expressionTrackers = Array.from({ length: CONFIG.maxUsers }, () => new ExpressionTracker());
+const resetExpressions = () => { expressionTrackers = Array.from({ length: CONFIG.maxUsers }, () => new ExpressionTracker()); };
 
 // 手勢（gesture.js 的 updateGestures()）：每幀算出「每個槽位（＝演奏者 ID）的拋物線觸發序號」＋「這一幀真的在場的槽位」，
 // 經 setPerformanceStateListener 註冊的回呼送出。main.js 註冊 input/gestureTrigger.js 的監聽，揮手與鍵盤並存。
-const EMPTY_PERFORMANCE_STATE = { arcTriggerSeqBySlot: {}, arcTroughMsBySlot: {}, presentSlots: [] };
+const EMPTY_PERFORMANCE_STATE = { arcTriggerSeqBySlot: {}, arcTroughMsBySlot: {}, arcIntensityBySlot: {}, expressionBySlot: {}, presentSlots: [] };
 
 let performanceStateListener = null;
 let lastSentState = null;
@@ -391,6 +396,27 @@ const ARM_JOINTS = [MP_LEFT_SHOULDER, MP_RIGHT_SHOULDER, MP_LEFT_ELBOW, MP_RIGHT
 // 臉部只標關鍵五官：雙眼（2/5）、鼻子（0）各畫一個獨立節點、不連線；嘴巴兩節點（9/10）加上虛擬下巴節點（virtualChinPoint()）連成倒三角形。
 const MOUTH_PAIR = [9, 10];
 
+// 情緒外接框：框住這個人上半身的節點（expression.js 的 box），框往外留白的寬度、線的粗細與亮度跟著表情 energy 放大縮小。
+// 在鏡像轉換之內畫（座標跟骨架一樣是正規化座標）。
+function drawEmotionBox(track, color, W, H) {
+  const ex = expressionTrackers[track.slot];
+  const b = ex?.box;
+  if (!b) return;
+  const e = ex.energy;
+  const sc = track.scale * W;                       // 這個人的尺度（像素）
+  const pad = sc * (0.15 + 0.55 * e);               // 越有活力框越大
+  const x = b.x0 * W - pad, y = b.y0 * H - pad, w = (b.x1 - b.x0) * W + 2 * pad, h = (b.y1 - b.y0) * H + 2 * pad;
+  const r = Math.min(w, h) * 0.12;
+  ctx2d.save();
+  ctx2d.globalAlpha = 0.25 + 0.55 * e;
+  ctx2d.strokeStyle = color;
+  ctx2d.lineWidth = 1.5 + 4 * e;
+  ctx2d.beginPath();
+  if (ctx2d.roundRect) ctx2d.roundRect(x, y, w, h, r); else ctx2d.rect(x, y, w, h);   // roundRect：Firefox 112／Safari 16 之前沒有
+  ctx2d.stroke();
+  ctx2d.restore();
+}
+
 // 2D 覆蓋層繪製骨架：依鎖定槽位上色，同一人跨幀顏色不變。
 function renderSkeletonOverlay(activeTracks) {
   const W = overlayCanvas.width;
@@ -405,6 +431,7 @@ function renderSkeletonOverlay(activeTracks) {
 
   for (const track of activeTracks) {
     const color = POSE_COLORS[track.slot % POSE_COLORS.length];
+    drawEmotionBox(track, color, W, H);
 
     // 低可見度（遮擋/猜測）的關節不繪製。visible 由 tracking.js 算好（可見度先 EMA 平滑、再套遲滯門檻），這裡不自己比門檻，否則邊緣關節會逐幀閃爍。骨架累積成 Path2D 後一次畫完，不用 DrawingUtils 逐條逐點畫。
     const lm = track.smoothed;
@@ -581,6 +608,15 @@ function runPipeline(ts, startMs, rawPoses, detectMs, captureLagMs, detectorRan,
   // ▶ 手勢（gesture.js）：每個槽位（＝演奏者 ID）左右手各一個 ArcDetector，另外回報這一幀真的在場的槽位；槽位數＝追蹤器目前的槽位數（＝現場人數）。
   // 最低點的時刻用這張畫面被拍下的時刻（rVFC 的 captureTime；瀏覽器沒提供就用 ts）：揮手的動作時刻，排程器拿來估速、比先後
   const gesture = updateGestures(activeTracks, tracker.cfg.maxUsers, ts, captureLagMs === null ? ts : ts - captureLagMs);
+  // ▶ 表情（外接框）：每個在場的人一個 energy（0～1），送給排程器調力度；不在場的槽位不帶（排程器改用按鍵力道推算）
+  const expressionBySlot = {};
+  const activeBySlot = new Map(activeTracks.map((t) => [t.slot, t]));
+  for (let slot = 0; slot < tracker.cfg.maxUsers; slot++) {
+    const t = activeBySlot.get(slot) ?? null;
+    const r = expressionTrackers[slot].update(t, ts);
+    if (t) expressionBySlot[slot + 1] = r.energy;
+  }
+  gesture.expressionBySlot = expressionBySlot;
   emitGesturePerformanceState(gesture, ts);
 
   // ▶ WebGL 渲染攝影機畫面當背景：有推論時是送去推論的那一張，沒推論時是當下這張
@@ -846,6 +882,7 @@ async function initSystem() {
 export function hardReset() {
   tracker.hardReset();
   resetGestures();
+  resetExpressions();
   forgetTracking = true;
   emitGesturePerformanceState(EMPTY_PERFORMANCE_STATE, performance.now());
   ctx2d.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
@@ -896,6 +933,7 @@ function applyPoseCount(count) {
   if (tracker.cfg.maxUsers !== count) {
     tracker = new PersonTracker({ maxUsers: count });
     resetGestures();
+    resetExpressions();
     ctx2d.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     emitGesturePerformanceState(EMPTY_PERFORMANCE_STATE, performance.now());
   }

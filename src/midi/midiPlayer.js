@@ -149,6 +149,11 @@ export function setPresentSlots(slots) {
   synth.scheduler.setPresence(slots, performance.now());
 }
 
+// 表情（main.js 把 vision 送來的 expressionBySlot 接到這裡）：在場的人有攝影機表情，不在場的改回用按鍵力道推算（見 scheduler.js 的 setExpression()）
+export function setExpressions(bySlot = {}) {
+  for (let slot = 1; slot <= PLAYER_COUNT; slot++) synth.scheduler.setExpression(slot, bySlot[slot] ?? null);
+}
+
 // 放開一個鍵（main.js 把鍵盤的 keyup 接到這裡）：輸入事件帶 key（keyboard.js 的 { slot, source, key, eventTimeMs, receivedMs }），收掉登記這個鍵的你的音（keyup 模式，見 scheduler.js 的 lift()）。
 export function liftInput(input) {
   synth.scheduler.lift(input);

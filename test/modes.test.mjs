@@ -199,3 +199,14 @@ test('音的長短：起音與音樂家模式由放開決定（keyup），拍子
   assert.ok(lenOf('musician') < 400);
   assert.ok(lenOf('beat') > 900);
 });
+
+test('智能切換：還沒按過任何一下的人（一直不在、被代打）不會被切換模式', () => {
+  const score = loadSong('duet', { accompaniment: true });
+  const sim = createSim(score, assign(score, ['kb', 1]), { modes: { kb: 'auto', 1: 'auto' } });
+  sim.addBot(scoreBot(1, { jitterMs: 20 }));
+  sim.advance(15000);
+  const kb = sim.sched.viewState().performers.find((p) => p.slot === 'kb');
+  assert.equal(kb.state, 'substitute');
+  assert.equal(kb.mode, 'onset');
+  assert.equal(kb.suggestion, null);
+});
