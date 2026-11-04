@@ -155,6 +155,11 @@ function mergeByDue(a, b) {
   return out;
 }
 
+// 秒 ↔ tick 來回換算的浮點誤差（9600 變成 9599.999999…）：跳位置的目標離整數 tick 不到這麼多就當成那個整數，
+// 不然結尾剛好在目標上的音會被當成「還在響」追音，發出一個 0 長度的音
+const TICK_EPS = 1e-6;
+const snapTick = (x) => { const r = Math.round(x); return Math.abs(x - r) < TICK_EPS ? r : x; };
+
 // 依 tick 遞增的陣列裡第一個 ≥ x 的位置（二分搜尋 lower bound）；x 可以是 ±Infinity
 function lowerBound(a, x) {
   let lo = 0, hi = a.length;
@@ -237,12 +242,14 @@ function makePerformerState(index, plan, tempo = new TempoFollower()) {
     missStartMs: null,     // 從沒觸發過的人：合奏開始走過他的起音的時鐘（第二段防呆「離上一下多久」從這裡算）
     restEndMs: null,       // 他第一個錯過的那一下前面是長休止時，合奏走到那一下的時鐘（第二段防呆不算他的休止，見 _restEndMs）
     lastAutoMs: null,      // 他上一個起音被自動放行的時鐘（代打交還時比哪個起音最近）
+    // 剛落後跳過（被合奏拉到前面）的人還要連續幾下同步才能接手帶頭：剛跳完的人位置是合奏給的、不是他自己的節奏，馬上交給他帶，下一下就又出狀況換回來（來回跳）
+    jumpRecover: 0,
   };
 }
 
 // 合奏（伴奏）的執行期狀態：帶頭的人、合奏錨點（anchor 跟帶頭的人觸發時的錨點是同一個物件）、合奏走到過的最遠位置
 // （floorTick：合奏位置不倒退，換人或帶頭的人落後時用）、佇列（timed：伴奏的音、送電腦合成器的控制器、整體參數 SysEx；clock：還沒開始彈的演奏者的控制器，時鐘到了才送）。
-const makeEnsemble = () => ({ leader: null, anchor: null, floorTick: -Infinity, timed: [], clock: [] });
+const makeEnsemble = () => ({ leader: null, leaderSinceMs: -Infinity, anchor: null, floorTick: -Infinity, timed: [], clock: [] });
 
 export class Scheduler {
   constructor(config = {}) {
@@ -497,6 +504,7 @@ export class Scheduler {
       p.missStartMs = null;
       p.restEndMs = null;
       p.lastAutoMs = null;
+      p.jumpRecover = 0;
       p.tempo.reset();
     }
     this._ensemble = makeEnsemble();
@@ -761,7 +769,7 @@ export class Scheduler {
       if (!shouldSubstitute({ missed, sinceLastMs: since, beatMs: beat, absentMs, k: this.cfg.stage2K })) continue;
       this._setStatus(p, 'substitute', 'stage2', clock);
       p.lastAutoMs = null;   // 上一次代打留下的不算
-      this._substituteFrom(p, this.getPositionTicks(), clock);
+      this._substituteFrom(p, snapTick(this.getPositionTicks()), clock);
     }
   }
 
@@ -876,11 +884,14 @@ export class Scheduler {
   _updateLeader(clock, reason = null, force = false, entering = null) {
     const E = this._ensemble, cur = E.leader, slots = this._roster.slots(), at = (s) => this._bySlot.get(s);
     const entry = cur?.status === 'ok' && this._isResting(cur) ? cur.plan.driverTicks[cur.cursor] : null;
-    const ok = (p) => this._isCandidate(p, cur, clock, entering) && (cur?.status !== 'trouble' || p === cur || !this._stallWhy(p, clock))
-      && (entry === null || (p.plan.driverTicks[p.groupEnd] ?? Infinity) < entry);
-    let slot = pickLeader(slots, (s) => ok(at(s)));
     const stall = cur?.status === 'trouble' ? this._stallWhy(cur, clock) : null;
     const gone = stall && (reason !== null || stall === 'absent' || clock - cur.lastTriggerMs > threshold(ENSEMBLE.ACTIVE_BEATS, ENSEMBLE.ACTIVE_MIN_MS, this._beatMsNow()));
+    // 剛落後跳過的人（jumpRecover）只在現任已經不能帶（沒有人、停住而且不算正在彈、被代打）時才接手
+    const curOut = !cur || gone || cur.status === 'substitute' || cur.cursor >= cur.plan.driverSegs.length;
+    const ok = (p) => this._isCandidate(p, cur, clock, entering) && (cur?.status !== 'trouble' || p === cur || !this._stallWhy(p, clock))
+      && (entry === null || (p.plan.driverTicks[p.groupEnd] ?? Infinity) < entry)
+      && (p === cur || !p.jumpRecover || curOut);
+    let slot = pickLeader(slots, (s) => ok(at(s)));
     if (slot === null && (!cur || gone)) {
       slot = pickLeader(slots, (s) => at(s) !== cur && this._isCandidate(at(s), null, clock, entering, 'trouble') && !this._stallWhy(at(s), clock))
         ?? pickLeader(slots, (s) => at(s) !== cur && this._isRestingStandIn(at(s)));
@@ -889,6 +900,8 @@ export class Scheduler {
     if (next === cur || (next === null && !force)) return;
     const why = reason ?? (!cur ? 'first' : cur.status === 'trouble' ? cur.statusReason
       : cur.cursor >= cur.plan.driverSegs.length ? 'done' : this._isResting(cur) ? 'rest' : 'return');
+    // 名單更前面的人恢復正常、拿回帶頭（return）：現任要先帶滿最短帶頭時間，不然恢復、出狀況、恢復會讓伴奏在幾個人之間來回換
+    if (why === 'return' && clock - this._ensemble.leaderSinceMs < threshold(ENSEMBLE.LEADER_TENURE_BEATS, ENSEMBLE.LEADER_TENURE_MIN_MS, this._beatMsNow())) return;
     this._switchLeader(next, clock, why);
   }
 
@@ -897,6 +910,7 @@ export class Scheduler {
   _switchLeader(next, clock, reason) {
     const E = this._ensemble, cur = E.leader;
     this.events.queue('leader', { from: cur?.slot ?? null, to: next?.slot ?? null, reason, clockMs: clock });
+    E.leaderSinceMs = clock;
     if (!E.anchor || (!cur && this._ensembleNextTick(next) === this._ensembleNextTick())) { E.leader = next; return; }
     // 已經到期、tick 還沒來得及放的照常先放（暫停中改指派時不放），再量合奏位置（照舊的帶頭者算）
     if (this._playing) { this._emitTimed(clock); this._emitClock(clock); }
@@ -907,9 +921,9 @@ export class Scheduler {
       const a = next.anchor, nt = next.plan.driverSegs[next.cursor]?.ticks;
       let sec = a.scoreSec + ((clock - a.clockMs) * a.rate) / 1000;
       if (nt !== undefined) sec = Math.min(sec, this._secOf(nt));
-      target = Math.max(target, this._score.secondsToMIDITicks(sec));
+      target = Math.max(target, snapTick(this._score.secondsToMIDITicks(sec)));
     }
-    this._jumpEnsemble(target, clock, this._holdOwner().tempo.playbackRate);
+    this._jumpEnsemble(snapTick(target), clock, this._holdOwner().tempo.playbackRate);
   }
 
   // 合奏在時鐘 clock 跳到 toTick、以速度 rate 重新對時（換帶頭的人時）：還沒送出的伴奏佇列作廢；合奏走過的最遠位置到 toTick 之間還沒響的伴奏音照垂直切片處理
@@ -1124,15 +1138,21 @@ export class Scheduler {
     let act = this._classify(p, j, motion, ev.source), jumped = false;
     if (act === 'jump') {
       jumped = true;
+      p.jumpRecover = ENSEMBLE.JUMP_RECOVER_PRESSES;
       this._clockMs = clock;
       this._lastTickMs = ev.receivedMs;
       const chased = this._jumpBehind(p, ev, clock, motion);
       // 合奏位置上沒有他的音在響：游標已經移到下一個起音，這一下當成提早觸發它（照休止符鎖，區間重新判斷；規格「合奏」）
       j = p.groupEnd;
-      if (chased || j >= p.plan.driverSegs.length) {
+      if (chased) {
         this._trackRecovery(p, clock, motion, this._positionAt(motion), true);
         this._pressEvent(p, ev, clock, 'released', true);
         return true;
+      }
+      if (j >= p.plan.driverSegs.length) {
+        // 合奏已經走過他最後一個音：他的聲部結束了，這一下沒有音可以放（不補放走過的音：會在錯的位置響）。記成 'late'，不是放行
+        this._pressEvent(p, ev, clock, 'late', true);
+        return false;
       }
       p.zone = before.zone;
       p.offRun = before.offRun;
@@ -1140,6 +1160,7 @@ export class Scheduler {
       act = this._classify(p, j, motion, ev.source);
     }
     this._trackRecovery(p, clock, motion, p.plan.driverTicks[j], jumped);
+    if (!jumped && p.jumpRecover > 0 && (p.zone === 'sync' || p.zone === 'slight')) p.jumpRecover--;
     if (act === 'lock') {
       p.tempo.accept(j, this._secOf(p.plan.driverTicks[j]), head, motion);   // 鎖住的這一下照樣進估速與去抖（放出時不再算一次）
       p.lastHead = j;
@@ -1221,6 +1242,8 @@ export class Scheduler {
     if (!L || L.status !== 'ok' || L.credit || L.groupEnd >= L.plan.driverSegs.length) return;
     const why = this._stallWhy(L, clock) ?? (this._majorityOff(L, clock) ? 'majority' : null);
     if (!why) return;
+    // 帶頭的人剛換上來：先給他 ENSEMBLE.LEADER_TENURE 的時間站穩（不在鏡頭裡例外），不然兩個都不穩的人會在一兩秒內來回交棒
+    if (why !== 'absent' && clock - this._ensemble.leaderSinceMs < threshold(ENSEMBLE.LEADER_TENURE_BEATS, ENSEMBLE.LEADER_TENURE_MIN_MS, this._beatMsNow())) return;
     this._setStatus(L, 'trouble', why, clock);
     this._updateLeader(clock, why);
   }
@@ -1275,7 +1298,7 @@ export class Scheduler {
   // e 上沒有他的音在響（休止、斷奏的空檔）時只做到跳過與移游標（控制器帶到下一個起音之前），
   // 回傳 false，由呼叫端把這一下當成提早觸發下一個起音。估速歷史從這一下重新開始：跳過的那段不是他彈的間隔。
   _jumpBehind(p, ev, clock, motion) {
-    const e = this.getPositionTicks(), eSec = this._secOf(e), rate = p.tempo.playbackRate;
+    const e = snapTick(this.getPositionTicks()), eSec = this._secOf(e), rate = p.tempo.playbackRate;
     const inFlight = this._takeInFlight(p, clock);
     this._flushAutoReleases(p, clock);
     if (p.stalled) { p.stalled = false; this.events.queue('stall', { group: p.index, slot: p.slot, state: 'end', clockMs: clock }); }
@@ -1557,7 +1580,7 @@ export class Scheduler {
   /** 量測：這首歌目前合奏的速度區間 { lo, hi }（帶頭的人的，rateBoundsFor 依他的聲部起音間隔算出的複本）。 */
   rateBounds() { return { ...this._holdOwner().tempo.bounds }; }
 
-  // 按鍵嘗試的事件（按鍵記錄 pressLog() 是它的訂閱者）。result：'released' 放行、'blocked' 被去抖擋掉、'prelude' 前奏中的預按、'rest' 休止符鎖的預按、
+  // 按鍵嘗試的事件（按鍵記錄 pressLog() 是它的訂閱者）。result：'released' 放行、'late' 合奏已經走過他最後一個音（落後跳之後沒有音可放）、'blocked' 被去抖擋掉、'prelude' 前奏中的預按、'rest' 休止符鎖的預按、
   // 'ahead' 揮手超前被鎖住、'takeover' 代打交還時接手電腦剛替他放的音（不重彈）；
   // jumped＝落後跳到合奏位置（_jumpBehind）。ev 是輸入事件（見 trigger()）：來源與事件發生的時刻原樣記下（用槽位觸發時是 null）。
   _pressEvent(p, ev, clockMs, result, jumped = false) {

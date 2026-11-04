@@ -47,6 +47,11 @@ src/
 
 `@mediapipe/tasks-vision`（`src/vision/poseWorker.js`）與 `spessasynth_lib`（`src/midi/synth.js`）都直接寫死完整 CDN 網址（jsDelivr）匯入，`tasks-vision` 固定 `@1.1.1`（bundle、loader、`.wasm` 必須同版）、`spessasynth_lib` 固定 `@4.3.14`；沒有 import map、JS 套件沒有本地副本。
 
-## 文件
+## 測試
 
-設計規格、開發指引（`CLAUDE.md`、`docs/`）與測試（`test/`）只留在開發者本機，不進 git。
+需要 Node 22 以上，不需要 `npm install`（沒有相依套件）。
+
+- `npm test`：排程器、合奏、演奏模式等的單元與模擬測試（`test/*.test.mjs`）。測資是程式產生的合成樂譜（`test/helpers/songs.js`），單人起音模式的手感基準在 `test/fixtures/`。
+- `npm run test:e2e`：無頭 Chromium 開真正的頁面跑操作流程（需要網路載入 CDN；Playwright 用環境裡預裝的那份）。
+
+需要真人與攝影機才能驗證的項目在 `docs/MANUAL-TESTS.md`；開發中的判斷與取捨記在 `docs/DECISIONS.md`。程式註解裡提到的 `docs/design-spec.md`、N1、A16 等編號是不在這個 repo 裡的舊文件。

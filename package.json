@@ -1,0 +1,10 @@
+{
+  "name": "harmonyflow",
+  "private": true,
+  "type": "module",
+  "description": "瀏覽器端的 MIDI 合奏 app。app 本身沒有相依套件、沒有 build step；這個檔只為了用 Node 內建的測試跑 test/（不需要 npm install）。",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:e2e": "node test/e2e/run.mjs"
+  }
+}

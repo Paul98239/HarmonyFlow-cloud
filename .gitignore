@@ -8,3 +8,4 @@ node_modules/
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
+test/e2e/out/

@@ -25,7 +25,9 @@ export const ENSEMBLE = Object.freeze({
   RECOVER_BEATS: 1 / 4, RECOVER_PERSIST: 2,                // 多數決出狀況的人連續幾下 |x| 小於這個才恢復
   STEADY_RATIO: 1.5, STEADY_PRESSES: 3,                    // 停住、代打回來的人：相鄰間隔的隱含速度差小於這個倍數才接成一串，至少這麼多下
   STEADY_BEATS: 2, STEADY_MIN_MS: 1000,                    // 這一串跨過這麼久（拍長照他自己的速度）就恢復
-  SMPTE_BEAT_SEC: 0.5,                                     // SMPTE 檔沒有四分音符，一拍當 0.5 樂譜秒
+  SMPTE_BEAT_SEC: 0.5,
+  LEADER_TENURE_BEATS: 2, LEADER_TENURE_MIN_MS: 1200,      // 換上來的帶頭者至少帶這麼久，才會因為停住、多數決再被換掉（不在鏡頭裡例外）：兩個都不穩的人不會來回交棒
+  JUMP_RECOVER_PRESSES: 2,                                 // 落後跳過的人要連續這麼多下同步（同步／稍快稍慢），才能接手帶頭（現任不能帶時例外）                                     // SMPTE 檔沒有四分音符，一拍當 0.5 樂譜秒
 });
 
 /** 門檻（ms）：拍數換成目前一拍的 ms，跟 ms 下限取大。 */
