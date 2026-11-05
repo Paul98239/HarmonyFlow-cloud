@@ -8,7 +8,10 @@ export async function boot(page, url) {
 
 export async function loadLocal(page, out, name) {
   await page.setInputFiles('#localMidiInput', `${out}${name}.mid`);
-  await page.waitForFunction(() => document.querySelectorAll('#scorePartList .score-part-id').length > 0, null, { timeout: 10000 });
+  // 等到換成這首歌（歌名）而且分譜清單畫好：只等清單有東西的話，換第二首時會讀到上一首還沒換掉的清單
+  await page.waitForFunction((file) => document.getElementById('midiStatusText').textContent.includes(file)
+    && document.querySelectorAll('#scorePartList .score-part-id').length > 0, `${name}.mid`, { timeout: 10000 });
+  await page.waitForTimeout(100);
 }
 
 export async function openSongPanel(page) {

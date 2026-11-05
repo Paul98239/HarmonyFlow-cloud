@@ -34,7 +34,8 @@ export function bunching(sim, { minRatio = 0.2, minScoreGapSec = 0.05 } = {}) {
   const rateAt = (ms) => { const i = upperBound(anchorAt, ms + 1) - 1; return i >= 0 ? anchors[i][1] : 1; };
   // 兩個音之間合奏重新對時過（帶頭的人按了下一下）：這段間隔是跟著他按的，不是電腦自己擠（音樂家模式他按多快合奏就多快，速度估計有上限、按下去的位置沒有）
   const pressAt = sim.events.filter((e) => e.type === 'anchor' && e.ensemble).map((e) => e.clockMs);
-  const pressedBetween = (a, b) => { const i = upperBound(pressAt, a + 1); return i < pressAt.length && pressAt[i] <= b - 1; };
+  // (a, b]：按在後一顆音那一刻也算（那顆音就是跟著他這一下響的）
+  const pressedBetween = (a, b) => { const i = upperBound(pressAt, a); return i < pressAt.length && pressAt[i] <= b + 1; };
   const squeezed = (i) => {
     const ds = sim.score.midiTicksToSeconds(ticks[i]) - sim.score.midiTicksToSeconds(ticks[i - 1]);
     if (ds < minScoreGapSec) return null;
@@ -94,6 +95,8 @@ export function leaderPingPong(sim, { windowMs = 1200 } = {}) {
     // 被迫的交棒（帶頭的人彈完、被拿掉指派、揮手沒確認、離開鏡頭、速度離群、休止交棒）不是來回跳
     if (['done', 'removed', 'unconfirmed', 'absent', 'racing', 'rest'].includes(ev[i].reason)) continue;
     if (ev[i - 1].to === null) continue;   // 中間一段是「沒有人帶頭」（暫時的人沒確認被移出名單）：不是在兩個演奏者之間跳
+    // 中間那位帶了 0ms（同一刻先換給候補、合奏跳到他那裡之後原本在休止的人可以接，馬上換過去）：兩次跳位置在同一刻、等於一次往前跳，伴奏沒有在兩個人之間來回
+    if (ev[i].clockMs === ev[i - 1].clockMs) continue;
     if (ev[i].to === ev[i - 2].to && ev[i].to !== ev[i - 1].to && ev[i].simMs - ev[i - 1].simMs < windowMs) n++;
   }
   return n;
