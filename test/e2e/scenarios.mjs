@@ -487,3 +487,47 @@ SCENARIOS.comfort = async ({ page, url, out }) => {
   await btn.click();
   await page.waitForFunction(() => !document.fullscreenElement, null, { timeout: 3000 });
 };
+
+// 很密、很大聲的歌（12 聲部、三和弦、力度 127）：輸出不超過 1.0（不爆音）。沒有軟削波時峰值實測 1.67、九成的時間都在削波
+SCENARIOS.noClipping = async ({ page, url, out }) => {
+  const { buildMidi } = await import('../helpers/smf.js');
+  const { writeFileSync } = await import('node:fs');
+  const ppq = 480, parts = [];
+  for (let p = 0; p < 12; p++) {
+    const notes = [];
+    for (let t = 0; t < 32 * ppq; t += ppq / 2) for (let c = 0; c < 3; c++) notes.push({ tick: t, dur: ppq / 2, pitch: 36 + p * 4 + c * 4, vel: 127 });
+    parts.push(p === 9 ? { channel: 9, notes: notes.map((n) => ({ ...n, pitch: 36 + (n.pitch % 12) })) } : { program: [0, 48, 56, 61, 33, 40, 73, 24, 19, 0, 52, 89][p], notes });
+  }
+  writeFileSync(`${out}loud.mid`, buildMidi({ ppq, tempos: [{ tick: 0, bpm: 120 }], timeSigs: [{ tick: 0, num: 4, den: 4 }], parts }));
+  await page.addInitScript(() => {
+    // 輸出路徑上不能有 DynamicsCompressor（固定 6ms 的預看延遲，每一顆音都晚）
+    const mk = BaseAudioContext.prototype.createDynamicsCompressor;
+    window.__compressors = 0;
+    BaseAudioContext.prototype.createDynamicsCompressor = function (...a) { window.__compressors++; return mk.apply(this, a); };
+    const orig = AudioNode.prototype.connect;
+    window.__peak = { max: 0, over: 0, frames: 0 };
+    AudioNode.prototype.connect = function (dest, ...rest) {
+      const r = orig.call(this, dest, ...rest);
+      if (dest instanceof AudioDestinationNode && !this.__tapped) {
+        this.__tapped = true;
+        const an = this.context.createAnalyser(); an.fftSize = 2048; orig.call(this, an);
+        const buf = new Float32Array(an.fftSize);
+        setInterval(() => { an.getFloatTimeDomainData(buf); let m = 0; for (const v of buf) m = Math.max(m, Math.abs(v)); window.__peak.frames++; window.__peak.max = Math.max(window.__peak.max, m); if (m > 1) window.__peak.over++; }, 40);
+      }
+      return r;
+    };
+  });
+  await boot(page, url);
+  await loadLocal(page, out, 'loud');
+  await assignPart(page, 0, 'kb');
+  await closePanel(page);
+  await play(page);
+  await page.focus('body');
+  for (let i = 0; i < 16; i++) { await page.keyboard.down('Semicolon'); await page.waitForTimeout(150); await page.keyboard.up('Semicolon'); await page.waitForTimeout(150); }
+  const p = await page.evaluate(() => window.__peak);
+  if (p.frames < 20) throw new Error(`沒量到輸出：${JSON.stringify(p)}`);
+  if (p.over > 0 || p.max > 1) throw new Error(`輸出削波（爆音）：${JSON.stringify(p)}`);
+  if (p.max < 0.5) throw new Error(`輸出太小聲：${JSON.stringify(p)}`);
+  const comps = await page.evaluate(() => window.__compressors);
+  if (comps) throw new Error(`輸出路徑上建了 ${comps} 個 DynamicsCompressor（每顆音晚 6ms）`);
+};

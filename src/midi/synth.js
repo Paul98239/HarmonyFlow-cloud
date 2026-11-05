@@ -123,7 +123,18 @@ const GATE_RAMP_TC = 0.03;   // humanGain on/off 的 setTargetAtTime 時間常�
 const HUMAN_EMPHASIS_GAIN = 1.2; // humanGain 開啟時的目標值；1.4 時真人實測高音太突出、蓋過電腦的低音，所以降到 1.2（約 +1.6 dB）
 
 let audioCtx, synth, masterGain;
-// 真人聲部是獨立的第二個合成器 synthHuman，經 humanGain（總開關，播放器決定開關、這裡只平滑切換）接到同一個 compressor
+let softClip;   // 輸出端的軟削波（見 initEngine）
+const MASTER_GAIN = 2.0, LEVEL_MATCH = 1.6, SOFT_CLIP_RANGE = 4, SOFT_CLIP_KNEE = 0.7;
+// 軟削波的曲線：輸入（已經縮小 SOFT_CLIP_RANGE 倍）u ∈ [-1, 1] → 原本的訊號 x = u × RANGE；|x| ≤ KNEE 照原樣，以上用 tanh 圓滑地壓向 1（永遠不超過）
+export function softClipCurve(n = 8192) {
+  const c = new Float32Array(n), K = SOFT_CLIP_KNEE;
+  for (let i = 0; i < n; i++) {
+    const x = ((i / (n - 1)) * 2 - 1) * SOFT_CLIP_RANGE, a = Math.abs(x);
+    c[i] = Math.sign(x) * (a <= K ? a : K + (1 - K) * Math.tanh((a - K) / (1 - K)));
+  }
+  return c;
+}
+// 真人聲部是獨立的第二個合成器 synthHuman，經 humanGain（總開關，播放器決定開關、這裡只平滑切換）接到同一條輸出（masterGain → 軟削波）
 let synthHuman, humanGain;
 let isReady = false;
 let initPromise = null;
@@ -180,26 +191,29 @@ export async function initEngine() {
 
       // 建構子第二個參數（SynthConfig）刻意不傳：用標準 Web Audio 節點、沒有監聽 spessasynth 內建事件系統，全吃函式庫預設值
       synth = new WorkletSynthesizer(audioCtx);
-      // 真人聲部的第二個合成器：經 humanGain（預設靜音，開啟時比電腦輔助軌大聲）→ 同一個 compressor，與電腦輔助軌共用動態處理
+      // 真人聲部的第二個合成器：經 humanGain（預設靜音，開啟時比電腦輔助軌大聲）→ 同一條輸出（masterGain → 軟削波）
       synthHuman = new WorkletSynthesizer(audioCtx);
       scheduler.setSynths(synth, synthHuman);
-      const compressor = audioCtx.createDynamicsCompressor();
-      compressor.threshold.value = -18;
-      compressor.knee.value = 6;
-      compressor.ratio.value = 2;
-      compressor.attack.value = 0.005;
-      compressor.release.value = 0.1;
+      // 輸出不經過 DynamicsCompressor：它有固定 6ms 的預看延遲（實測：脈衝晚 6.0ms 出來），每一顆音（含鍵盤手自己的音）都晚 6ms。
+      // 原本的輕壓縮（-18dB、2:1）主要的效果是自動補償增益（響度 +4.4dB）：改成固定的 LEVEL_MATCH 倍，峰值交給不加延遲的軟削波。
+      // 五首測資的響度跟原本差不到 0.4dB（見 docs/DECISIONS.md D8-5）
       masterGain = audioCtx.createGain();
-      // 音量固定在 2.0，不提供面板拉桿——要調大小聲請直接調電腦本機的音量。
-      masterGain.gain.value = 2.0;
+      // 音量固定在 MASTER_GAIN（2.0）× LEVEL_MATCH，不提供面板拉桿——要調大小聲請直接調電腦本機的音量。
+      // 實際寫的再除以 SOFT_CLIP_RANGE：後面的軟削波（WaveShaper）的曲線只吃 ±1，先縮小、曲線裡再放大回來（見 softClipCurve()）
+      masterGain.gain.value = (MASTER_GAIN * LEVEL_MATCH) / SOFT_CLIP_RANGE;
+      // 軟削波：很密、很大聲的歌（全編制、力度 127）峰值實測到 1.67，超過 1.0 的部分在輸出端被硬切掉＝刺耳的爆音。
+      // 0.7 以下完全不動，以上圓滑地壓向 1.0。WaveShaper 不加延遲（不超取樣）
+      softClip = audioCtx.createWaveShaper();
+      softClip.curve = softClipCurve();
+      softClip.oversample = 'none';
       humanGain = audioCtx.createGain();
       humanGain.gain.value = 0; // 預設靜音，播放中且有指派才由 updateHumanGain 拉起來
       // 電腦輔助軌不掛額外 gain：它是真人聲部音量的比較基準，必須固定不動
-      synth.connect(compressor);
+      synth.connect(masterGain);
       synthHuman.connect(humanGain);
-      humanGain.connect(compressor);
-      compressor.connect(masterGain);
-      masterGain.connect(audioCtx.destination);
+      humanGain.connect(masterGain);
+      masterGain.connect(softClip);
+      softClip.connect(audioCtx.destination);
 
       // 依序試每個來源。同一個 id 'main' 重複加入會取代前一個（addSoundBank 新增或取代同 ID 的音色庫），所以第一個來源只裝進一個合成器就失敗時，換下一個不會留下混版本的狀態
       let lastErr;
@@ -246,6 +260,7 @@ export async function initEngine() {
       synthHuman = undefined;
       scheduler.setSynths(null, null);
       masterGain = undefined;
+      softClip = undefined;
       humanGain = undefined;
       isReady = false;
       return false;
