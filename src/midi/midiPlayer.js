@@ -575,6 +575,27 @@ function installGuards() {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && playerStore.state.mode === 'perform') haltPerformance('⏸ 切到別的畫面時演奏已先暫停；回來按 ▶ 繼續');
   });
+  // 播放中不讓螢幕變暗、休眠（Screen Wake Lock）：只用揮手的人不會碰滑鼠鍵盤，筆電／電視幾分鐘後就會關螢幕。暫停、播完就放開；
+  // 切到別的分頁時瀏覽器會自動放開，回來還在播就再要一次。不支援的瀏覽器什麼都不做
+  let wakeLock = null, wantWake = false, wakeLockWarned = false;
+  const syncWakeLock = async () => {
+    wantWake = playerStore.state.transport === 'playing' && document.visibilityState === 'visible';
+    if (!navigator.wakeLock) return;
+    try {
+      if (wantWake && !wakeLock) {
+        const lock = await navigator.wakeLock.request('screen');
+        if (!wantWake) { lock.release().catch(() => {}); return; }   // 要到的時候已經暫停了
+        wakeLock = lock;
+        lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
+      } else if (!wantWake && wakeLock) {
+        const lock = wakeLock; wakeLock = null;
+        await lock.release();
+      }
+    } catch (err) { if (!wakeLockWarned) { wakeLockWarned = true; console.warn('⚠️ 不能讓螢幕保持亮著（瀏覽器拒絕 Wake Lock）', err?.message ?? err); } }
+  };
+  let lastTransport = null;
+  playerStore.addEventListener('change', () => { const t = playerStore.state.transport; if (t !== lastTransport) { lastTransport = t; syncWakeLock(); } });
+  document.addEventListener('visibilitychange', syncWakeLock);
   window.addEventListener('error', (e) => reportFault('window', e.error ?? e.message));
   window.addEventListener('unhandledrejection', (e) => reportFault('promise', e.reason));
 }

@@ -730,6 +730,9 @@ body, html {
     background: var(--accent); border-color: var(--accent); color: var(--on-accent);
   }
 
+  /* 演奏中滑鼠沒動就藏游標（src/ui.js 的 mountCursorAutoHide） */
+  body.cursor-idle, body.cursor-idle * { cursor: none; }
+
   /* 鍵盤焦點框：只在瀏覽器判斷該顯示焦點時（Tab 到、程式 focus）才出現，滑鼠點按不會。 */
   .btn:focus-visible, .tl-select:focus-visible, .player-input:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 2px;

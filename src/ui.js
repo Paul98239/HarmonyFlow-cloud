@@ -129,12 +129,19 @@ function mountUiScale() {
 const cameraBtn = document.getElementById('btn-camera-toggle');
 const poseCountSelect = document.getElementById('poseCountSelect');
 const resetBtn = document.getElementById('btn-reset-pose');
+const fullscreenBtn = document.getElementById('btn-fullscreen');
+const canFullscreen = !!document.documentElement.requestFullscreen && document.fullscreenEnabled !== false;
 const note = document.getElementById('system-note');
 
 const systemBarActions = {
   'camera-toggle': () => {
     // 失敗原因由狀態機的 message 帶回來（render 顯示在 note），這裡只留 console 紀錄
     (getCameraState().on ? stopCamera() : startCamera()).catch((err) => console.error('❌ 鏡頭開關失敗', err));
+  },
+  // 全螢幕（接電視、投影機）：再按一次或按 Esc 離開
+  'fullscreen': () => {
+    const op = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+    op?.catch?.((err) => console.warn('全螢幕切換失敗', err));
   },
   // 一次性動畫不是狀態，直接切 class；先移除再強制 reflow 才 add，快速連點才會重播（時長與退場在 CSS 的 reset-flash）
   'reset-pose': () => {
@@ -185,6 +192,9 @@ async function runPoseCountSwitch() {
 }
 
 function mountSystemBar() {
+  fullscreenBtn.hidden = !canFullscreen;
+  document.addEventListener('fullscreenchange', scheduleRender);
+  mountCursorAutoHide();
   // message 是關閉原因或開啟失敗的文字（""＝使用者自己關的）；按鈕顏色與 disabled 在 render 裡讀 getCameraState()
   setCameraStateListener(({ message }) => {
     uiStore.set({ systemNote: message ? { text: message, isError: true } : null });
@@ -197,6 +207,9 @@ function renderSystemBar({ ui, camera, poseCount }) {
   if (cameraBtn.getAttribute('aria-label') !== label) cameraBtn.setAttribute('aria-label', label);
   cameraBtn.classList.toggle('is-on', camera.on);
   cameraBtn.disabled = camera.busy;
+  const fs = !!document.fullscreenElement, fsLabel = fs ? '離開全螢幕' : '全螢幕';
+  if (fullscreenBtn.getAttribute('aria-label') !== fsLabel) { fullscreenBtn.setAttribute('aria-label', fsLabel); fullscreenBtn.textContent = fs ? '離開全螢幕' : '全螢幕'; }
+  fullscreenBtn.classList.toggle('is-on', fs);
 
   // 下拉刻意不鎖（鎖 1~2 秒等於選錯不能改），靠防抖＋單飛；切換成功與否都由 getPoseCount() 校正畫面上的值
   const value = poseCount ? String(poseCount) : ''; // 0（還沒選）對不到任何 option
@@ -206,6 +219,20 @@ function renderSystemBar({ ui, camera, poseCount }) {
   if (note.textContent !== text) note.textContent = text;
   note.classList.toggle('is-error', !!ui.systemNote?.isError);
   note.hidden = !text;
+}
+
+// 演奏中滑鼠游標停在舞台上會擋到人與樂器：CURSOR_IDLE_MS 沒動就藏起來（body.cursor-idle），一動就出現。只在播放中藏
+const CURSOR_IDLE_MS = 2500;
+function mountCursorAutoHide() {
+  let timer = 0;
+  const show = () => {
+    document.body.classList.remove('cursor-idle');
+    clearTimeout(timer);
+    timer = setTimeout(() => { if (playerModule?.playerStore.state.transport === 'playing') document.body.classList.add('cursor-idle'); }, CURSOR_IDLE_MS);
+  };
+  window.addEventListener('pointermove', show, { passive: true });
+  window.addEventListener('pointerdown', show, { passive: true });
+  show();
 }
 
 const systemBar = { actions: systemBarActions, fields: systemBarFields, mount: mountSystemBar, render: renderSystemBar };

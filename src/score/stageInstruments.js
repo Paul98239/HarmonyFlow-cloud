@@ -8,10 +8,12 @@
 
 import { slotColor, hexRgb, rgba } from './palette.js';
 import { getReservedBottom, getReservedTop } from './layout.js';
+import { gmProgramNameZh } from '../midi/parts.js';
 
 const FPS = 30;
 const BASE_ALPHA = 0.5;        // 樂器本體的不透明度：它是背景，人（骨架）在它前面
 const MAX_HELD_MS = 12000;     // 沒收到 noteOff 的音（漏掉的事件）最多亮這麼久
+const AMBIENT_TAU_MS = 700;    // 伴奏的地板光暗下來的時間常數
 // 「減少動態效果」：查一次、之後跟著系統設定的變化更新（每幀呼叫 matchMedia 在效能分析裡看得到）
 const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null;
 let reduced = motionQuery?.matches ?? false;
@@ -94,6 +96,7 @@ export function startStageInstruments({ getStatic, getView, isActive, subscribe,
     lastStatic = stat;
     instruments = (stat ?? []).map((s) => ({
       ...s, kind: instrumentKind(s.program, s.isDrum), rgb: hexRgb(slotColor(s.slot)),
+      name: gmProgramNameZh(s.program, s.isDrum) || '',   // 樂器下面的小字：一眼知道哪一件是自己的
       notes: [],            // { pitch, at, off, vel }：at＝響的時刻（performance.now 時間軸）、off＝結束的時刻（還沒收到是 Infinity）
       bowDir: 1,            // 弓：每個新的音換一次方向
       x: null,              // 畫面上的水平中心（0～1），往目標位置平滑移動
@@ -106,7 +109,10 @@ export function startStageInstruments({ getStatic, getView, isActive, subscribe,
 
   // 事件的時刻換到 performance.now 的時間軸：帶時間戳（lookahead 提早送出）的照它真正響的時刻
   const realAt = (e, dueMs) => performance.now() + (e.timed && Number.isFinite(dueMs) ? Math.max(0, dueMs - e.clockMs) : 0);
+  // 伴奏的「呼吸」：電腦伴奏的每顆音（照它真正響的時刻）把地板的暖光推亮一點，之後慢慢暗下來——看得出後面的樂團正在跟著你演奏，你停下來它也靜下來
+  const ambient = { level: 0, at: performance.now(), pending: [] };
   subscribe('noteOn', (e) => {
+    if (e.kind === 'assist') { ambient.pending.push([realAt(e, e.dueMs), (e.velocity ?? 80) / 127]); if (ambient.pending.length > 256) ambient.pending.shift(); dirty = true; return; }
     const inst = byStaff.get(e.staffId);
     if (!inst) return;
     const at = realAt(e, e.dueMs);
@@ -142,12 +148,17 @@ export function startStageInstruments({ getStatic, getView, isActive, subscribe,
       if (inst.notes.length) animating = true;
     }
     const moved = place(instruments, getPositions(), now - lastDraw);
+    // 伴奏的光：到時刻的音加進去（越多越亮、有上限），指數衰減（AMBIENT_TAU_MS）
+    ambient.level *= Math.exp(-Math.max(0, now - ambient.at) / AMBIENT_TAU_MS);
+    ambient.at = now;
+    ambient.pending = ambient.pending.filter(([at, v]) => { if (at > now) return true; ambient.level = Math.min(1, ambient.level + 0.12 * (0.4 + 0.6 * v)); return false; });
+    if (ambient.level > 0.01) animating = true;
     if (!animating && !dirty && !moved) return;
     lastDraw = now;
     dirty = false;
     const t0 = performance.now();
     const subs = new Set(view?.performers.filter((p) => p.state === 'substitute').map((p) => p.slot));
-    drawAll(ctx, size, instruments, now, subs, reduceMotion());
+    drawAll(ctx, size, instruments, now, subs, reduceMotion(), ambient.level);
     const ms = performance.now() - t0;
     stats.frames++; stats.totalMs += ms; if (ms > stats.maxMs) stats.maxMs = ms;
   };
@@ -211,13 +222,23 @@ function noteStates(inst, now) {
   return out;
 }
 
-function drawAll(ctx, { w: W, h: H }, instruments, now, subs, still) {
+function drawAll(ctx, { w: W, h: H }, instruments, now, subs, still, ambient = 0) {
   ctx.clearRect(0, 0, W, H);
   const top = H * getReservedTop(), bottom = H * (1 - getReservedBottom());
   const band = Math.max(1, bottom - top), n = instruments.length;
+  // 地板的暖光跟著伴奏呼吸（減少動態效果時固定一個淡淡的亮度）
+  const glowA = still ? 0.06 : 0.16 * ambient;
+  if (glowA > 0.004) {
+    const g = ctx.createRadialGradient(W / 2, bottom, 0, W / 2, bottom, W * 0.55);
+    g.addColorStop(0, `rgba(255, 176, 100, ${glowA})`);
+    g.addColorStop(1, 'rgba(255, 176, 100, 0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, top, W, bottom - top);
+  }
   // 放在舞台下半（人站在前面）、各自的水平位置（place()）：每件的格子寬不超過畫面的 1/5
   const cellW = W * layoutCell, cellH = Math.min(band * 0.46, cellW * 0.78);
-  const y = bottom - cellH - band * 0.04;
+  const labelPx = Math.max(11 * (W / Math.max(1, ctx.canvas.clientWidth || W)), cellH * 0.13);
+  const y = bottom - cellH - labelPx * 1.5 - band * 0.02;
   instruments.forEach((inst) => {
     const cx = (inst.x ?? 0.5) * W;
     const box = { x: cx - cellW * 0.42, y, w: cellW * 0.84, h: cellH };
@@ -234,6 +255,13 @@ function drawAll(ctx, { w: W, h: H }, instruments, now, subs, still) {
       ctx.fillRect(box.x - box.w * 0.15, box.y - box.h * 0.2, box.w * 1.3, box.h * 1.4);
     }
     (DRAW[inst.kind] ?? DRAW.pad)(ctx, box, inst, notes, alpha, now, still);
+    if (inst.name) {
+      ctx.globalAlpha = 1;
+      ctx.font = `700 ${Math.round(labelPx)}px system-ui, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillStyle = rgba(inst.rgb, subs.has(inst.slot) ? 0.5 : 0.85);
+      ctx.fillText(inst.name, box.x + box.w / 2, box.y + box.h + labelPx * 0.35, box.w * 1.1);
+    }
     ctx.restore();
   });
 }

@@ -97,6 +97,8 @@
             <option value="4">4 人</option>
           </select>
           <button id="btn-reset-pose" class="btn tl-text-btn" type="button" data-action="reset-pose" aria-label="重置骨架 ID">重置</button>
+          <!-- 全螢幕（接電視、投影機時）：不支援 Fullscreen API 的瀏覽器（iPhone Safari）不顯示，見 src/ui.js -->
+          <button id="btn-fullscreen" class="btn tl-text-btn" type="button" data-action="fullscreen" aria-label="全螢幕" hidden>全螢幕</button>
           <div id="system-note" class="tl-note" hidden></div>
         </div>
         <div class="tl-widget">

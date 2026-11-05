@@ -465,3 +465,25 @@ SCENARIOS.perfBudget = async ({ page, url, out }) => {
   if (r.long && r.long.總ms > 250) throw new Error(`長任務太多：${JSON.stringify(r.long)}`);
   if (late > Math.max(3, r.tick.count * 0.05)) throw new Error(`排程 tick 常常晚過 lookahead：${JSON.stringify(r.tick)}`);
 };
+
+// 演奏時的舒適：滑鼠沒動一陣子游標藏起來、一動就出現；全螢幕鈕切得進去也切得出來（不支援的瀏覽器不顯示）；播放中要求螢幕不休眠不會出錯
+SCENARIOS.comfort = async ({ page, url, out }) => {
+  await boot(page, url);
+  await loadLocal(page, out, 'duet');
+  await assignPart(page, 0, 'kb');
+  await closePanel(page);
+  await play(page);
+  await page.mouse.move(600, 400);
+  await page.waitForTimeout(3000);
+  if (!(await page.evaluate(() => document.body.classList.contains('cursor-idle')))) throw new Error('播放中滑鼠沒動，游標沒有藏起來');
+  await page.mouse.move(620, 420);
+  if (await page.evaluate(() => document.body.classList.contains('cursor-idle'))) throw new Error('滑鼠動了游標沒有出現');
+  const btn = page.locator('#btn-fullscreen');
+  if (await btn.isHidden()) return;   // 這個瀏覽器不支援全螢幕
+  await page.hover('#control-row').catch(() => {});
+  await btn.click();
+  await page.waitForFunction(() => !!document.fullscreenElement, null, { timeout: 3000 });
+  if ((await btn.getAttribute('aria-label')) !== '離開全螢幕') throw new Error('全螢幕之後按鈕沒有變成「離開全螢幕」');
+  await btn.click();
+  await page.waitForFunction(() => !document.fullscreenElement, null, { timeout: 3000 });
+};
