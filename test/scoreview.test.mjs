@@ -47,3 +47,27 @@ test('畫面狀態：下一下（next.from）就是排程器下一個要放的�
   assert.equal(after.lanes.length, 3);
   assert.ok(after.version > before.version);
 });
+
+test('很長的錄音（13 分鐘、6000 個音、未量化）估拍子不會卡住主執行緒', async () => {
+  const { buildMidi } = await import('./helpers/smf.js');
+  const { parseMidi } = await import('../src/midi/midiParser.js');
+  const { beatLines } = await import('../src/midi/beats.js');
+  const { rng } = await import('./helpers/songs.js');
+  const r = rng(3), notes = [];
+  let t = 0;
+  for (let i = 0; i < 6000; i++) { notes.push({ tick: Math.round(t), dur: 200, pitch: 50 + (i % 30) }); t += 60 + r() * 140; }
+  const score = parseMidi(buildMidi({ parts: [{ notes }] }));
+  const t0 = performance.now();
+  const b = beatLines(score);
+  assert.equal(b.source, 'pulse');
+  assert.ok(performance.now() - t0 < 300, `花了 ${(performance.now() - t0).toFixed(0)}ms`);
+});
+
+test('樂譜資料記下每條最長的音（畫面往回找長音用），長音不會在還在響的時候從畫面消失', () => {
+  const score = loadSong('slowLong');   // 第一個聲部是 4 拍（40 BPM，約 6 秒）的長音
+  const sim = createSim(score, assign(score, [1]));
+  const L = sim.sched.scoreView().lanes[0];
+  let longest = 0;
+  for (let i = 0; i < L.start.length; i++) longest = Math.max(longest, L.end[i] - L.start[i]);
+  assert.ok(L.maxDur >= longest - 1e-9 && longest > 5);
+});

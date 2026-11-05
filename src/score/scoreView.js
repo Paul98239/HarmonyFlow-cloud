@@ -4,7 +4,8 @@
 // 任何 MIDI 都能畫：每條的音在載入時排好（scheduler.js 的 scoreView()，依起音排序），每一幀只用二分搜尋找畫面內的那一段；音高範圍依這個聲部自己的最低到最高音縮放；
 // 打擊、和弦、很密的快音都只是長方形。主執行緒負擔：一張 canvas、最多 30fps、只在演奏中畫、不用陰影與濾鏡；每幀的耗時記在 stats（__scoreViewStats()）。
 
-import { slotColor } from './palette.js';
+import { slotColor, hexRgb, rgba } from './palette.js';
+import { lowerBound } from '../midi/search.js';
 import { setReservedBottom, setReservedTop } from './layout.js';
 
 const FPS = 30;
@@ -12,13 +13,12 @@ const PAST_SEC = 0.8;        // 「現在」線左邊顯示多久之前（真實
 const FUTURE_SEC = 5;        // 右邊顯示多久之後（真實秒）
 const NOW_X = 0.14;          // 「現在」線在寬度的哪裡
 
-const lowerBound = (a, x) => { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < x) lo = m + 1; else hi = m; } return lo; };
-
-function hexToRgb(hex) {
-  const h = hex.replace('#', '');
-  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
-}
-const rgba = (rgb, a) => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+// 每條的資料依槽位查：只在 scoreView() 的結果換了（載入、改指派）時重建
+let bySlotFor = null, bySlot = null;
+const lanesBySlot = (stat) => {
+  if (bySlotFor !== stat) { bySlotFor = stat; bySlot = new Map(stat.lanes.map((l) => [l.slot, l])); }
+  return bySlot;
+};
 
 export const stats = { frames: 0, totalMs: 0, maxMs: 0, reset() { this.frames = 0; this.totalMs = 0; this.maxMs = 0; } };
 
@@ -47,7 +47,8 @@ export function startScoreView({ getView, getStatic, isActive }) {
     const pr = panel.getBoundingClientRect();
     setReservedBottom((sr.bottom - pr.top) / sr.height + 0.02);
   };
-  if (stage) new ResizeObserver(publishReserved).observe(stage);
+  // 舞台變大小、工具列變高（長歌名換行、系統提示出現）、面板變高都要重量
+  if (stage) { const ro = new ResizeObserver(publishReserved); ro.observe(stage); if (topStack) ro.observe(topStack); ro.observe(panel); }
   publishReserved();
   const resize = () => {
     publishReserved();
@@ -85,12 +86,12 @@ function draw(ctx, { w: W, h: H, dpr }, view, stat, nowMs) {
   const nowX = Math.round(W * NOW_X), pxPerScoreSec = (W - nowX) / (FUTURE_SEC * rate);
   const xOf = (sec) => nowX + (sec - pos) * pxPerScoreSec;
   const visLo = pos - PAST_SEC * rate, visHi = pos + FUTURE_SEC * rate;
-  const byslot = new Map(stat.lanes.map((l) => [l.slot, l]));
+  const byslot = lanesBySlot(stat);
   const pulse = 0.5 + 0.5 * Math.sin(nowMs / 140);
   for (let i = 0; i < n; i++) {
     const v = lanes[i], L = byslot.get(v.slot);
     if (!L) continue;
-    const rgb = hexToRgb(slotColor(v.slot));
+    const rgb = hexRgb(slotColor(v.slot));
     const y0 = Math.round(i * laneH) + 2 * dpr, lh = Math.round(laneH) - 4 * dpr;
     if (lh < 8 * dpr) continue;   // 版面還沒量好（剛顯示、還沒 resize）時條高可能是 0 或負的
     // 底色：代打中泛紅、落後泛橘、休息／等待泛藍
@@ -109,8 +110,8 @@ function draw(ctx, { w: W, h: H, dpr }, view, stat, nowMs) {
     const barH = Math.max(3 * dpr, Math.min(12 * dpr, inner / (range + 1)));
     const yOf = (p) => y0 + pad + (1 - (p - L.lo) / range) * (inner - barH);
     const from = v.next.from, to = v.next.to;
-    // 第一個可能看得到的音：起音在 visLo 之前、結尾還在畫面內的長音也要畫，往回多看最長 8 秒
-    for (let k = lowerBound(L.start, visLo - 8); k < L.start.length && L.start[k] <= visHi; k++) {
+    // 第一個可能看得到的音：起音在 visLo 之前、結尾還在畫面內的長音也要畫，往回多看這條最長那顆音的長度
+    for (let k = lowerBound(L.start, visLo - L.maxDur); k < L.start.length && L.start[k] <= visHi; k++) {
       if (L.end[k] < visLo) continue;
       const x = xOf(L.start[k]), x2 = Math.max(x + 3 * dpr, xOf(L.end[k]));
       const seg = L.seg[k];

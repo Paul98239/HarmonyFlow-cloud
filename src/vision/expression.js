@@ -32,10 +32,11 @@ const MIN_SIZE_RANGE = 0.8;    // 框大小（尺度單位）的個人範圍下�
 const MIN_SPEED_RANGE = 2;     // 手速（尺度／秒）的個人範圍下限
 
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
-function percentile(xs, q) {
-  if (!xs.length) return 0;
-  const s = [...xs].sort((a, b) => a - b);
-  return s[Math.min(s.length - 1, Math.floor(q * s.length))];
+// 一次排序取第 10、50、90 百分位（每幀每個人只排一次）
+function spread(xs) {
+  if (!xs.length) return { p10: 0, p50: 0, p90: 0 };
+  const s = Float64Array.from(xs).sort(), at = (q) => s[Math.min(s.length - 1, Math.floor(q * s.length))];
+  return { p10: at(0.1), p50: at(0.5), p90: at(0.9) };
 }
 
 /**
@@ -116,7 +117,7 @@ export class ExpressionTracker {
       while (this._samples.length && nowMs - this._samples[0].t > HISTORY_MS) this._samples.shift();
     }
     const sizes = this._samples.map((s) => s.size), speeds = this._samples.map((s) => s.speed);
-    const rel = (x, xs, minRange) => clamp01(0.5 + (x - percentile(xs, 0.5)) / Math.max(minRange, percentile(xs, 0.9) - percentile(xs, 0.1)));
+    const rel = (x, xs, minRange) => { const q = spread(xs); return clamp01(0.5 + (x - q.p50) / Math.max(minRange, q.p90 - q.p10)); };
     const relSize = rel(envSize, sizes, MIN_SIZE_RANGE), relSpeed = rel(envSpeed, speeds, MIN_SPEED_RANGE);
     // 絕對值：手放下、站著的框大約 1.5～2 個尺度；雙手張開舉高約 3.5 以上。手速 5 尺度／秒算很快
     const absSize = clamp01((envSize - 1.8) / 2.2), absSpeed = clamp01(envSpeed / 5);

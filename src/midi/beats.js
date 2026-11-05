@@ -11,6 +11,7 @@
 // 單位的頭一定是他自己的起音，所以按下去一定當下有聲音（不會按在一拍的開頭、音卻在半拍之後才出來）。整拍都沒有他的音的拍不需要按。
 
 import { buildBeatGrid } from './timeline.js';
+import { lowerBound, upperBound } from './search.js';
 
 // 應用層數字（不是規格）：
 export const BEAT_MIN_SEC = 0.36;     // 拍線間隔（原速）短於這個就合併：0.36 秒 ≈ 167 BPM，再快一般人揮不過來
@@ -20,8 +21,6 @@ const GRID_FIT_MIN = 0.45;            // 有音的拍裡，拍線上真的有起
 const ONSET_MERGE_SEC = 0.05;         // 估脈動時，相差不到這麼多的起音算同一個（和弦錯位、裝飾音）
 const EARLY_TOL = 0.15;               // 起音比拍線早不到「這一拍的這麼多」也算那一拍（搶拍）
 
-const lowerBound = (a, x) => { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < x) lo = m + 1; else hi = m; } return lo; };
-const upperBound = (a, x) => { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= x) lo = m + 1; else hi = m; } return lo; };
 
 /** 拍號格線合不合：有音的拍裡，拍線上（±GRID_FIT_TOL_BEATS 拍）真的有起音的比例 */
 export function gridFit(score, beats) {
@@ -67,21 +66,30 @@ function linesFromGrid(score, beats) {
 
 /**
  * 從起音時刻估脈動（秒）：起音兩兩的時間差落在候選週期整數倍附近的程度（加權），乘上偏好 0.6 秒（100 BPM）一帶的先驗。
- * 只看 4 個週期以內的配對，n 個起音約 O(n × 候選數)。onsets：[{ sec, w }] 依時間排序。
+ * 先把「兩兩的時間差」（最長 PULSE_MAX_LAG_SEC）累積成 5ms 一格的直方圖，再對每個候選週期掃直方圖：
+ * 成本是 O(配對數 + 候選數 × 格數)，跟曲子長度幾乎無關（13 分鐘、6000 個音的錄音約 30ms；原本逐對掃要 1 秒、會卡住主執行緒）。onsets：[{ sec, w }] 依時間排序。
  */
+const PULSE_BIN_SEC = 0.005;
+const PULSE_MAX_LAG_SEC = 6;   // 4 × 最長的候選週期 1.5 秒
 export function estimatePulse(onsets) {
   if (onsets.length < 3) return 0.6;
+  const bins = new Float64Array(Math.ceil(PULSE_MAX_LAG_SEC / PULSE_BIN_SEC) + 1);
+  for (let i = 0; i < onsets.length; i++) {
+    for (let j = i + 1; j < onsets.length; j++) {
+      const d = onsets[j].sec - onsets[i].sec;
+      if (d > PULSE_MAX_LAG_SEC) break;
+      bins[Math.round(d / PULSE_BIN_SEC)] += onsets[i].w * onsets[j].w;
+    }
+  }
   let best = 0.6, bestScore = -Infinity;
   for (let P = 0.3; P <= 1.5; P += 0.005) {
     let s = 0;
-    for (let i = 0; i < onsets.length; i++) {
-      for (let j = i + 1; j < onsets.length; j++) {
-        const d = onsets[j].sec - onsets[i].sec;
-        if (d > 4 * P) break;
-        const r = d / P, k = Math.round(r);
-        if (k < 1) continue;
-        s += (onsets[i].w * onsets[j].w * Math.exp(-((r - k) ** 2) / (2 * 0.05 ** 2))) / k;
-      }
+    const last = Math.min(bins.length - 1, Math.floor((4 * P) / PULSE_BIN_SEC));
+    for (let b = 1; b <= last; b++) {
+      if (!bins[b]) continue;
+      const r = (b * PULSE_BIN_SEC) / P, k = Math.round(r);
+      if (k < 1) continue;
+      s += (bins[b] * Math.exp(-((r - k) ** 2) / (2 * 0.05 ** 2))) / k;
     }
     s *= Math.exp(-(Math.log2(P / 0.6) ** 2) / (2 * 0.8 ** 2));
     if (s > bestScore) { bestScore = s; best = P; }

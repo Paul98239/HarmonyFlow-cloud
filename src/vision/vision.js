@@ -6,7 +6,7 @@ import {
   updateGestures, resetGestures,
 } from "./gesture.js";
 import { ExpressionTracker } from "./expression.js";
-import { POSE_COLORS } from "../score/palette.js";
+import { POSE_COLORS, hexRgb, rgba as rgbaOf } from "../score/palette.js";
 import { getReservedBottom, getReservedTop } from "../score/layout.js";
 
 const CONFIG = {
@@ -409,8 +409,6 @@ const DRAW_TOP_MARGIN = 0.07;   // 畫面高度的比例
 let lastDrawMs = null;
 const triggerFlash = [];                    // 槽位 → { at, hand: 'left'|'right'|'both', intensity }
 export const skeletonStats = { frames: 0, totalMs: 0, maxMs: 0 };
-const hexRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
-const rgbaOf = (rgb, a) => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
 
 // 這一幀有哪些槽位揮中了（gesture.frame 的「這一幀算數的觸發是哪隻手」），記下光環的起點
 function noteTriggers(frameRows, intensityBySlot, ts) {
@@ -586,7 +584,7 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
     // 以肩寬換算此人在畫面上的尺度，讓字級隨遠近縮放；範圍收窄避免忽大忽小
     // 字級跟著畫出來的大小（縮到面板上方之後的肩寬 × ds）：人多、人被縮小時標籤不會互相疊在一起
     const shoulderWidthPx = ds * Math.hypot((lm[11].x - lm[12].x) * W, (lm[11].y - lm[12].y) * H);
-    const fontSizePx = Math.max(13, Math.min(36, shoulderWidthPx * 0.45));
+    const fontSizePx = Math.max(18, Math.min(36, shoulderWidthPx * 0.45));   // 下限 18px：長輩站在兩三公尺外也要看得清楚自己的 ID
     const headTopOffsetPx = Math.max(fontSizePx * 1.3, shoulderWidthPx * 0.7); // 眼睛到頭頂的估計距離
 
     // 鏡像＋跟骨架一樣縮到面板上方（ds，見上）
