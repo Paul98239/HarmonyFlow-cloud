@@ -8,7 +8,7 @@ export function delayedTriggers(sim) {
 }
 
 /**
- * 伴奏擠成一團：依起音 tick 排序的伴奏音（追音、跳過的不算），連續三個不同起音、兩兩的「真實間隔 ÷ 樂譜間隔」都小於 minRatio（＝比檔案快 1/minRatio 倍以上），
+ * 伴奏擠成一團：依起音 tick 排序的伴奏音（追音、跳過的不算），連續三個不同起音、兩兩的「真實間隔 × 合奏當時的速度 ÷ 樂譜間隔」都小於 minRatio（＝比合奏該有的速度還擠 1/minRatio 倍以上），
  * 而且樂譜間隔至少 minScoreGapSec（和弦錯位、裝飾音本來就擠）。回傳違規清單。
  */
 export function bunching(sim, { minRatio = 0.2, minScoreGapSec = 0.05 } = {}) {
@@ -27,11 +27,15 @@ export function bunching(sim, { minRatio = 0.2, minScoreGapSec = 0.05 } = {}) {
   const nearJump = (ms) => jumps.some((j) => ms >= j - 1 && ms - j < 60);
   // 「擠成一團」＝連續三個以上不同的起音被壓在一起（兩兩之間都比樂譜快 1/minRatio 倍以上）。只有兩個音靠在一起的是 lookahead 的極限：
   // 帶頭的人提早按時，已經帶時間戳送出（最多 LOOKAHEAD_MS 之前）的那一顆取消不了，會緊跟在新一拍的音後面響（見 docs/DECISIONS.md），不算
+  // 跟「合奏當時跟著的速度」比（最近一次錨點的速度）：帶頭的人彈得快，伴奏本來就該跟著快；擠成一團是比他的速度還擠（追趕、堆在一起）
+  const anchors = sim.events.filter((e) => (e.type === 'anchor' || e.type === 'reanchor') && e.ensemble && Number.isFinite(e.rate)).map((e) => [e.clockMs, e.rate]);
+  const rateAt = (ms) => { let r = 1; for (const [t, rate] of anchors) { if (t > ms + 1) break; r = rate; } return r; };
   const squeezed = (i) => {
     const ds = sim.score.midiTicksToSeconds(ticks[i]) - sim.score.midiTicksToSeconds(ticks[i - 1]);
     if (ds < minScoreGapSec) return null;
     const dr = (byTick.get(ticks[i]) - byTick.get(ticks[i - 1])) / 1000;
-    return dr / ds < minRatio ? { tick: ticks[i], scoreGap: ds, realGap: dr } : null;
+    const rate = Math.max(rateAt(byTick.get(ticks[i - 1])), rateAt(byTick.get(ticks[i])));
+    return (dr * rate) / ds < minRatio ? { tick: ticks[i], scoreGap: ds, realGap: dr, rate } : null;
   };
   const bad = [];
   for (let i = 2; i < ticks.length; i++) {
@@ -75,8 +79,9 @@ export function leaderPingPong(sim, { windowMs = 1200 } = {}) {
   const ev = sim.ofType('leader').filter((e) => e.reason !== 'tie');   // 同時開始的排序（tie）發生在開場同一刻，不是來回跳
   let n = 0;
   for (let i = 2; i < ev.length; i++) {
-    // 被迫的交棒（帶頭的人彈完、被拿掉指派、揮手沒確認、離開鏡頭、速度離群）不是來回跳
-    if (['done', 'removed', 'unconfirmed', 'absent', 'racing'].includes(ev[i].reason)) continue;
+    // 被迫的交棒（帶頭的人彈完、被拿掉指派、揮手沒確認、離開鏡頭、速度離群、休止交棒）不是來回跳
+    if (['done', 'removed', 'unconfirmed', 'absent', 'racing', 'rest'].includes(ev[i].reason)) continue;
+    if (ev[i - 1].to === null) continue;   // 中間一段是「沒有人帶頭」（暫時的人沒確認被移出名單）：不是在兩個演奏者之間跳
     if (ev[i].to === ev[i - 2].to && ev[i].to !== ev[i - 1].to && ev[i].simMs - ev[i - 1].simMs < windowMs) n++;
   }
   return n;

@@ -44,7 +44,7 @@ export class Sim {
     this.sched.setSynths(this.assist, this.human);
     this.sched.enableEventLog();
     this.events = [];
-    for (const type of ['press', 'release', 'leader', 'performer', 'chase', 'autoRelease', 'group', 'stall', 'finish', 'noteOn', 'noteOff', 'mode', 'hint']) {
+    for (const type of ['press', 'release', 'leader', 'performer', 'chase', 'autoRelease', 'group', 'stall', 'finish', 'noteOn', 'noteOff', 'mode', 'hint', 'anchor', 'reanchor']) {
       this.sched.events.on(type, (e) => this.events.push({ type, ...e, simMs: this.now }));
     }
     this.sched.load(score, assignments);
@@ -131,7 +131,7 @@ export function scoreBot(slot, opts = {}) {
   let lastFired = null;     // { index, at }：上一次按的是哪個起音
   let delayed = null;       // 漏按的那個起音 index：下一次改在它後面那個起音的時刻按
   const bot = {
-    slot, presses: 0, misses: 0, lastPressMs: -Infinity,
+    slot, presses: 0, misses: 0, lastPressMs: -Infinity, stopAtMs, resumeAtMs,
     // 沒有下一下要按（彈完、停手）時，按著的鍵在一段時間後放開（keyup 模式不放開音會一直響）
     idle(sim) { if (lastKey && sim.now - this.lastPressMs > 800) { sim.lift(slot, lastKey); lastKey = null; } },
     group(sim) { return sim.sched.inspect().groups.find((g) => g.slot === slot); },
@@ -190,12 +190,17 @@ export function scoreBot(slot, opts = {}) {
 /** 亂按：從 fromMs 到 toMs 每 periodMs±jitter 按一下，不看樂譜 */
 export function mashBot(slot, { fromMs, toMs, periodMs = 90, jitter = 0.5, source = slot === 'kb' ? 'keyboard' : 'gesture', seed = 11 } = {}) {
   const r = rng(seed);
-  let at = fromMs;
+  let at = fromMs, lastKey = null;
   return {
-    slot, presses: 0,
+    slot, presses: 0, stopMs: toMs,
     nextAt() { return at <= toMs ? at : null; },
+    // 鍵盤一定會放開：停手之後把最後一個鍵放掉（keyup 模式不放開音會一直響）
+    idle(sim) { if (lastKey) { sim.lift(slot, lastKey); lastKey = null; } },
     fire(sim) {
-      sim.press(slot, { source, key: source === 'keyboard' ? ['KeyA', 'KeyS', 'KeyD'][this.presses % 3] : undefined });
+      const key = source === 'keyboard' ? ['KeyA', 'KeyS', 'KeyD'][this.presses % 3] : undefined;
+      if (lastKey) sim.lift(slot, lastKey);
+      sim.press(slot, { source, key });
+      lastKey = key ?? null;
       this.presses++;
       at = sim.now + periodMs * (1 + (r() * 2 - 1) * jitter);
     },
@@ -225,8 +230,8 @@ export function beatBot(slot, { factor = 1, jitterMs = 0, seed = 21, source = sl
     },
     nextAt(sim) {
       if (!times) this._init(sim);
-      // 拍線用完了但還沒奏完（中間有一下被擋、慢了一拍）：真人會照同樣的拍子繼續揮到音樂結束，最多多揮 8 下
-      if (i >= times.length && times.length >= 2 && extra < 8 && !sim.sched.isFinished()) {
+      // 拍線用完了但還沒奏完（中間有一下被擋、慢了一拍；或在起音模式下一拍按一下，比音少）：真人會照同樣的拍子繼續揮到音樂結束（上限 400 下）
+      if (i >= times.length && times.length >= 2 && extra < 400 && !sim.sched.isFinished()) {
         const g = sim.sched.inspect().groups.find((x) => x.slot === slot);
         if (g.groupEnd < g.segments.length || g.credit) { times.push(times.at(-1) + (times.at(-1) - times.at(-2))); extra++; }
       }
@@ -247,7 +252,7 @@ export function beatBot(slot, { factor = 1, jitterMs = 0, seed = 21, source = sl
 /** 照著自己聲部每個音按的人（開迴路，照樂譜時刻 ÷ factor），相鄰太近（< minGapMs）的音只按第一個 */
 export function onsetBot(slot, { factor = 1, jitterMs = 0, seed = 31, minGapMs = 150, source = slot === 'kb' ? 'keyboard' : 'gesture' } = {}) {
   const r = rng(seed);
-  let times = null, i = 0, lastKey = null;
+  let times = null, i = 0, lastKey = null, extra = 0;
   return {
     slot, presses: 0,
     nextAt(sim) {
@@ -259,6 +264,11 @@ export function onsetBot(slot, { factor = 1, jitterMs = 0, seed = 31, minGapMs =
           if (!times.length || t - times.at(-1) >= minGapMs) times.push(t);
         }
         times = times.map((t) => t + (r() * 2 - 1) * jitterMs);
+      }
+      // 自己的音按完了但還沒奏完（有幾下被擋、被鎖）：照最後的間隔繼續按到結束（上限 400 下）
+      if (i >= times.length && times.length >= 2 && extra < 400 && !sim.sched.isFinished()) {
+        const g = sim.sched.inspect().groups.find((x) => x.slot === slot);
+        if (g.groupEnd < g.segments.length || g.credit) { times.push(times.at(-1) + Math.max(minGapMs, times.at(-1) - times.at(-2))); extra++; }
       }
       return i < times.length ? times[i] : null;
     },
