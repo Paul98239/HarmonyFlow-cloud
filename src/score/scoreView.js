@@ -70,7 +70,8 @@ export function startScoreView({ getView, getStatic, isActive }) {
     const show = active && n > 0 && !!stat;
     if (panel.hidden === show) { panel.hidden = !show; publishReserved(); }
     if (!show) return;
-    if (n !== lanesShown) { lanesShown = n; panel.style.setProperty('--lanes', String(n)); resize(); }
+    // 四條以上時每格只放得下兩行：面板切成緊湊版（CSS 的 .score-panel.is-dense）
+    if (n !== lanesShown) { lanesShown = n; panel.style.setProperty('--lanes', String(n)); panel.classList.toggle('is-dense', n >= 4); resize(); }
     const t0 = performance.now();
     draw(ctx, size, view, stat, now);
     const ms = performance.now() - t0;

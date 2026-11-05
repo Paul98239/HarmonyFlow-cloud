@@ -616,6 +616,11 @@ body, html {
 .hud-chip[data-state="resting"] .hud-state, .hud-chip[data-state="waiting"] .hud-state { color: #c8c8d0; }
 .hud-chip .hud-tip { font-size: 0.8em; color: #ffe08a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hud-chip .hud-tip:empty { display: none; }
+/* 緊湊版（四條以上）：名字一行、狀態一行，提示收起來（滑鼠移上去的 title 還看得到） */
+.score-panel.is-dense .hud-chip { padding: 0.05em 0.55em; line-height: 1.12; }
+.score-panel.is-dense .hud-chip .hud-who { font-size: 1em; }
+.score-panel.is-dense .hud-chip .hud-state { font-size: 0.92em; }
+.score-panel.is-dense .hud-chip .hud-tip { display: none; }
 
 /* 跑馬燈（.mq）：文字超出欄位寬度時頭尾相連 loop，放得下就一動不動。
    純 CSS，沒有 JS 計時或量測（Chromium 系限定；不支援的瀏覽器只是不 loop，退回 prefers-reduced-motion 同款的截斷顯示）。

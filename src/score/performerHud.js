@@ -86,6 +86,7 @@ export function startPerformerHud({ getView, isActive, subscribeMode }) {
         c.state.textContent = stateText;
         c.tip.textContent = tip;
         c.tip.title = tipFull;
+        c.el.title = tip ? `${tip}${tipFull ? `：${tipFull}` : ''}` : '';   // 緊湊版收起提示時，整格的滑鼠提示還看得到
         c.el.dataset.state = away ? 'behind' : p.state;
       }
       if (root.children[performers.indexOf(p)] !== c.el) root.insertBefore(c.el, root.children[performers.indexOf(p)] ?? null);   // 跟樂譜的條同一個順序

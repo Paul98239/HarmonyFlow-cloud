@@ -651,7 +651,7 @@ export class Scheduler {
     if (p) {
       p.modeSetting = setting;
       if (setting !== 'auto') this._switchMode(p, setting, 'user');
-      else this.events.queue('mode', { slot, mode: p.mode, setting, suggestion: p.suggestion, reason: 'user', clockMs: this._clockMs });
+      else this.events.queue('mode', { slot, from: p.mode, mode: p.mode, setting, suggestion: p.suggestion, reason: 'user', clockMs: this._clockMs });
     }
     this.events.flush();
   }
@@ -1064,11 +1064,12 @@ export class Scheduler {
     const entry = cur?.status === 'ok' && this._isResting(cur) ? cur.plan.driverTicks[cur.cursor] : null;
     const stall = cur?.status === 'trouble' ? this._stallWhy(cur, clock) : null;
     const gone = stall && (reason !== null || stall === 'absent' || clock - cur.lastTriggerMs > threshold(ENSEMBLE.ACTIVE_BEATS, ENSEMBLE.ACTIVE_MIN_MS, this._beatMsNow()));
-    // 剛落後跳過的人（jumpRecover）只在現任已經不能帶（沒有人、停住而且不算正在彈、被代打）時才接手
-    const curOut = !cur || gone || cur.status === 'substitute' || cur.cursor >= cur.plan.driverSegs.length;
+    // 剛落後跳過的人（jumpRecover）只在現任已經不能帶（沒有人、停住而且不算正在彈、被代打、彈完、速度離群）時才接手
+    const curOut = !cur || gone || cur.status === 'substitute' || cur.cursor >= cur.plan.driverSegs.length || (cur.statusReason === 'racing' && cur.status === 'trouble');
     const ok = (p) => this._isCandidate(p, cur, clock, entering) && (cur?.status !== 'trouble' || p === cur || !this._stallWhy(p, clock))
       && (entry === null || (p.plan.driverTicks[p.groupEnd] ?? Infinity) < entry)
-      && (p === cur || !p.jumpRecover || curOut);
+      && (p === cur || !p.jumpRecover || curOut)
+      && (p === cur || !this._racing(p, clock));
     let slot = pickLeader(slots, (s) => ok(at(s)));
     if (slot === null && (!cur || gone)) {
       slot = pickLeader(slots, (s) => at(s) !== cur && this._isCandidate(at(s), null, clock, entering, 'trouble') && !this._stallWhy(at(s), clock))
@@ -1503,7 +1504,10 @@ export class Scheduler {
   // 停住（_stallWhy）或 'majority'＝三人以上時其他正在彈的人過半同方向偏離、各連續 ENSEMBLE.MAJORITY_PERSIST 下。有預按的人算已經觸發了。
   _checkLeaderTrouble(clock) {
     const L = this._ensemble.leader;
-    if (!L || L.status !== 'ok' || L.credit || L.groupEnd >= L.plan.driverSegs.length) return;
+    if (!L || L.status !== 'ok' || L.groupEnd >= L.plan.driverSegs.length) return;
+    // 帶頭的人的速度跟其他正在彈的人差太多（亂按、連按把速度推上去）：不等最短帶頭時間，馬上換人——合奏每一下都對齊帶頭的人，他飆多快伴奏就被擠多快
+    if (this._racing(L, clock)) { this._setStatus(L, 'trouble', 'racing', clock); this._updateLeader(clock, 'racing'); return; }
+    if (L.credit) return;
     const why = this._stallWhy(L, clock) ?? (this._majorityOff(L, clock) ? 'majority' : null);
     if (!why) return;
     // 帶頭的人剛換上來：先給他 ENSEMBLE.LEADER_TENURE 的時間站穩（不在鏡頭裡例外），不然兩個都不穩的人會在一兩秒內來回交棒
@@ -1526,6 +1530,23 @@ export class Scheduler {
   _stepMs(p) {
     const j = p.groupEnd, from = p.lastHead ?? j - 1;
     return from < 0 ? 0 : ((this._pressSec(p, j) - this._pressSec(p, from)) * 1000) / p.tempo.playbackRate;
+  }
+
+  // 速度離群：名單上還有至少兩個別人正在彈（正常、不是代打、沒彈完），而他的速度是那些人速度中位數的 ENSEMBLE.RACE_RATIO 倍以上（或以下）。
+  // 一兩個人時永遠不算（單人手感不變；兩人時判不出是誰離群）。
+  _racing(p, clock) {
+    if (!p || p.lastTriggerMs === -Infinity || p.tempo.historyLength < 2) return false;
+    const beat = this._beatMsNow(), win = threshold(ENSEMBLE.ACTIVE_BEATS, ENSEMBLE.ACTIVE_MIN_MS, beat);
+    const rates = [];
+    for (const q of this._performers) {
+      if (q === p || q.slot === null || q.status !== 'ok' || q.cursor >= q.plan.driverSegs.length || clock - q.lastTriggerMs > win) continue;   // 用他保留的速度估計（被合奏拉著跳時估速歷史會清掉，但速度值保留）
+      rates.push(q.tempo.playbackRate);
+    }
+    // 至少要有兩個人可以比（合計三人以上）：兩個人時誰快誰慢是對稱的，判不出是誰在飆，硬判會在兩人之間來回換
+    if (rates.length < 2) return false;
+    rates.sort((a, b) => a - b);
+    const med = rates[rates.length >> 1], r = p.tempo.playbackRate;
+    return r > med * ENSEMBLE.RACE_RATIO || r < med / ENSEMBLE.RACE_RATIO;
   }
 
   // 多數決：名單上除了帶頭的人 L 以外正在彈的人至少兩位（合計三人以上），而且過半同方向偏離、各連續 ENSEMBLE.MAJORITY_PERSIST 下
@@ -1795,11 +1816,25 @@ export class Scheduler {
   // 這顆音的力度（dynamics.js）：演奏者的音看他的模式、這一下的力道、他的表情與平滑倍率（電腦代打中漸變到 SUBSTITUTE_GAIN；
   // 不是帶頭的人落拍時漸變到 BEHIND_GAIN，帶頭的人不會落拍——合奏跟著他）；電腦代打時力道當成中性（不是他按的）。伴奏跟著帶頭的人的表情。
   _velocityOf(staff, note, owner) {
-    if (staff.kind !== 'human' || !owner) return ensembleVelocity(note.velocity, this._ensemble.leader?.expression ?? 0.5);
+    if (staff.kind !== 'human' || !owner) return ensembleVelocity(note.velocity, this._groupExpression());
     const sub = owner.status === 'substitute';
     const target = sub ? SUBSTITUTE_GAIN : owner !== this._ensemble.leader && this._isOffBeat(owner) ? BEHIND_GAIN : 1;
     const gain = owner.gain.at(target, this._clockMs);
     return performerVelocity(note.velocity, { mode: owner.mode, intensity: sub ? 0.5 : owner.intensity, expression: owner.expression, gain });
+  }
+
+  // 伴奏跟著的表情：多人時一半看帶頭的人、一半看其他正在彈（不是代打、最近有觸發）的人的平均——合奏的情緒是大家的，不是只有帶頭的那一個；
+  // 一個人時就是他（跟原本一樣）。
+  _groupExpression() {
+    const L = this._ensemble.leader;
+    const win = threshold(ENSEMBLE.ACTIVE_BEATS, ENSEMBLE.ACTIVE_MIN_MS, this._score ? this._beatMsNow() : 500);
+    let sum = 0, n = 0;
+    for (const q of this._performers) {
+      if (q === L || q.slot === null || q.status === 'substitute' || this._clockMs - q.lastTriggerMs > win) continue;
+      sum += q.expression; n++;
+    }
+    if (!L) return n ? sum / n : 0.5;
+    return n ? 0.5 * L.expression + 0.5 * (sum / n) : L.expression;
   }
 
   // 落拍：他上一下落後偏離／脫隊，或已經錯過起音

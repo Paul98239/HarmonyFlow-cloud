@@ -129,7 +129,21 @@ function solo() {
   return { tempos: [{ tick: 0, bpm: 120 }], timeSigs: [{ tick: 0, num: 3, den: 4 }], parts: [{ program: 0, notes: [...run(0, 12, Q, [60, 64, 67]), ...run(12 * Q, 12, Q / 2, [72, 71])] }] };
 }
 
-export const SONG_SPECS = { duet, fastRuns, pickup, irregular, unquantized, smpte, canonRests, quartet, pianoChords, drums, slowLong, solo };
+// 五重奏（PC 鍵盤手＋演奏者 1～4）：五個聲部的節奏各不相同——旋律（八分與十六分快音）、切分的副旋律、長音（全音符）、有長休止的聲部、走低音
+function quintet() {
+  const mel = [], counter = [], pad = [], sparse = [], bass = [];
+  for (let bar = 0; bar < 8; bar++) {
+    const t = bar * 4 * Q;
+    mel.push(...run(t, 4, Q / 2, [76, 77, 79, 77]), ...(bar % 2 ? run(t + 2 * Q, 8, Q / 4, [79, 81, 79, 77]) : run(t + 2 * Q, 2, Q, [76, 74])));
+    counter.push(...run(t + Q / 2, 3, Q, [67, 69, 71]));            // 後半拍進
+    pad.push({ tick: t, dur: 4 * Q - 10, pitch: 60 + (bar % 3) });   // 全音符
+    if (bar % 4 < 2) sparse.push(...run(t, 4, Q, [64, 65, 67, 65])); // 兩小節彈、兩小節休
+    bass.push(...run(t, 4, Q, [43, 50, 47, 50]));
+  }
+  return { tempos: [{ tick: 0, bpm: 96 }], timeSigs: [{ tick: 0, num: 4, den: 4 }], parts: [[73, mel], [71, counter], [48, pad], [56, sparse], [32, bass]].map(([program, notes]) => ({ program, notes })) };
+}
+
+export const SONG_SPECS = { quintet, duet, fastRuns, pickup, irregular, unquantized, smpte, canonRests, quartet, pianoChords, drums, slowLong, solo };
 
 // 另加一個伴奏聲部（放在最後）：每兩個相鄰起音（全曲合起來）之間的正中間放一顆音，長度到下一個起音為止。
 // 這樣每一段兩下之間都有伴奏音在走，「伴奏擠成一團」「伴奏比帶頭的人晚」才量得出來（兩個聲部都被指派時本來沒有伴奏）。

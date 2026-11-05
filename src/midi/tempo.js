@@ -123,6 +123,8 @@ export class TempoFollower {
   }
 
   get bounds() { return this._rateBounds; }
+  /** 估速歷史裡有幾下（< 2 表示速度還沒估過、只是預設值） */
+  get historyLength() { return this._history.length; }
 
   // 唯讀快照（複本，給排程器的 inspect()）
   snapshot() {

@@ -309,3 +309,27 @@ SCENARIOS.skeletonClearOfPanel = async ({ page, url, out }) => {
   const lit = await page.evaluate(() => Number(getComputedStyle(document.getElementById('toolbar-playback')).opacity));
   if (!(lit > 0.95)) throw new Error(`滑鼠移到播放 pill 上沒有全亮：${lit}`);
 };
+
+// 五人（PC 鍵盤手＋4 個揮手的人）：五條樂譜、五格狀態，四個人都在觸發，鍵盤手也能演奏
+SCENARIOS.fivePerformers = async ({ page, url, out }) => {
+  await installFakePose(page, [0.2, 0.4, 0.6, 0.8].map((cx, i) => ({ cx, cy: 0.36, scale: 0.11, amp: 1.2, periodMs: 1100 + 120 * i, phaseMs: i * 180 })));
+  await boot(page, url);
+  await setPoseCount(page, 4);
+  await loadLocal(page, out, 'quintet');
+  await page.waitForTimeout(800);
+  for (const [i, v] of [[0, 'kb'], [1, '1'], [2, '2'], [3, '3'], [4, '4']]) await assignPart(page, i, v);
+  await closePanel(page);
+  await play(page);
+  await page.focus('body');
+  for (let i = 0; i < 8; i++) { await page.keyboard.press(i % 2 ? 'KeyJ' : 'KeyF'); await page.waitForTimeout(300); }
+  await page.waitForTimeout(4000);
+  const r = await page.evaluate(() => ({
+    lanes: Number(getComputedStyle(document.getElementById('score-panel')).getPropertyValue('--lanes')),
+    chips: document.querySelectorAll('#performer-hud .hud-chip').length,
+    bySlot: window.__pressLog().presses.reduce((m, p) => { m[p.slot] = (m[p.slot] || 0) + 1; return m; }, {}),
+  }));
+  if (r.lanes !== 5 || r.chips !== 5) throw new Error(`五人應該有五條：${JSON.stringify(r)}`);
+  for (const s of ['kb', 1, 2, 3, 4]) if (!(r.bySlot[s] >= 2)) throw new Error(`${s} 沒有在觸發：${JSON.stringify(r.bySlot)}`);
+  await page.mouse.move(640, 300);
+  await page.screenshot({ path: `${out}fivePerformers.png` });
+};

@@ -75,8 +75,8 @@ export function leaderPingPong(sim, { windowMs = 1200 } = {}) {
   const ev = sim.ofType('leader').filter((e) => e.reason !== 'tie');   // 同時開始的排序（tie）發生在開場同一刻，不是來回跳
   let n = 0;
   for (let i = 2; i < ev.length; i++) {
-    // 被迫的交棒（帶頭的人彈完、被拿掉指派、揮手沒確認、離開鏡頭）不是來回跳
-    if (['done', 'removed', 'unconfirmed', 'absent'].includes(ev[i].reason)) continue;
+    // 被迫的交棒（帶頭的人彈完、被拿掉指派、揮手沒確認、離開鏡頭、速度離群）不是來回跳
+    if (['done', 'removed', 'unconfirmed', 'absent', 'racing'].includes(ev[i].reason)) continue;
     if (ev[i].to === ev[i - 2].to && ev[i].to !== ev[i - 1].to && ev[i].simMs - ev[i - 1].simMs < windowMs) n++;
   }
   return n;

@@ -1,7 +1,10 @@
 // baseline.js — 單人、起音模式的手感基準：同一組樂譜與機器人，記下合成器呼叫的時刻與音高（不含力度）。
 // 用法見 test/tools/gen-baseline.mjs 與 test/baseline.test.mjs。機器人刻意不用排程器之後才加的 API（只讀 inspect().groups 的 groupEnd），新舊程式跑同一份。
 
-import { loadSong, SONG_NAMES, rng } from './songs.js';
+import { loadSong, rng } from './songs.js';
+
+// 基準是用原本的程式在這 12 首上錄的；之後新增的測資不放進來（不然 fixture 要重錄，就不再是「原本的程式」的手感）
+const BASELINE_SONGS = ['duet', 'fastRuns', 'pickup', 'irregular', 'unquantized', 'smpte', 'canonRests', 'quartet', 'pianoChords', 'drums', 'slowLong', 'solo'];
 
 const TICK = 12;
 
@@ -63,7 +66,7 @@ function runOne(Scheduler, score, unitId, slot, source, { factor, jitterMs, seed
 /** 全部基準：{ 名稱 → { finished, calls } } */
 export function baselineRuns(Scheduler) {
   const out = {};
-  for (const name of SONG_NAMES) {
+  for (const name of BASELINE_SONGS) {
     const score = loadSong(name);
     score.parts.slice(0, 2).forEach((part, pi) => {
       for (const [slot, source] of [['kb', 'keyboard'], [1, 'gesture']]) {
