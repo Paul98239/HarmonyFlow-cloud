@@ -442,3 +442,26 @@ SCENARIOS.stageInstruments = async ({ page, url, out }) => {
   await page.mouse.move(640, 300);
   await page.screenshot({ path: `${out}stageInstruments.png` });
 };
+
+// 效能預算（五人演奏中）：主執行緒沒有長任務堆積、排程 tick 幾乎都在 lookahead（50ms）之內——tick 晚了，電腦的音就來不及提早帶時間戳送出（會晚）。
+// 之前每幀在主執行緒 createImageBitmap(<video>)、把看不到的攝影機畫面上傳成 WebGL 貼圖，這裡會失敗
+SCENARIOS.perfBudget = async ({ page, url, out }) => {
+  await installFakePose(page, [0.2, 0.4, 0.6, 0.8].map((cx, i) => ({ cx, cy: 0.36, scale: 0.11, amp: 1.2, periodMs: 1100 + 120 * i, phaseMs: i * 180 })));
+  await boot(page, url);
+  await setPoseCount(page, 4);
+  await loadLocal(page, out, 'quintet');
+  await page.waitForTimeout(800);
+  for (const [i, v] of [[0, 'kb'], [1, '1'], [2, '2'], [3, '3'], [4, '4']]) await assignPart(page, i, v);
+  await closePanel(page);
+  await play(page);
+  await page.focus('body');
+  for (let i = 0; i < 20; i++) { await page.keyboard.press(i % 2 ? 'KeyJ' : 'KeyF'); await page.waitForTimeout(350); }
+  const r = await page.evaluate(() => {
+    const l = window.__latency(), k = Object.keys(l).find((x) => x.startsWith('現場人數'));
+    return k && { long: l[k].長任務, tick: l[k].排程tick間隔ms, main: l[k]['主執行緒佔比%'] };
+  });
+  if (!r) throw new Error('沒有量到演奏中的數字');
+  const late = r.tick['超過50ms'] ?? 0;
+  if (r.long && r.long.總ms > 250) throw new Error(`長任務太多：${JSON.stringify(r.long)}`);
+  if (late > Math.max(3, r.tick.count * 0.05)) throw new Error(`排程 tick 常常晚過 lookahead：${JSON.stringify(r.tick)}`);
+};

@@ -348,7 +348,12 @@ function syncCanvasSize() {
   }
 }
 
+// 攝影機畫面不顯示（舞台永久遮蓋，見 styles.css 的 #stage-blackout）：每幀把整張畫面上傳成 WebGL 貼圖再畫一次，只是白白佔用 GPU 頻寬與主執行緒
+//（720p 一幀約 3.6MB；軟體繪圖的機器上會變成幾十 ms 的長任務，排程 tick 跟著晚）。不上傳、不畫；要恢復顯示攝影機畫面時改成 true（WebGL 的部分都還在）
+const RENDER_CAMERA = false;
+
 function uploadVideoTexture(source) {
+  if (!RENDER_CAMERA) return;
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, glTexture);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
@@ -356,6 +361,7 @@ function uploadVideoTexture(source) {
 
 // source："sent"＝畫送出推論前已上傳的那一張（sendFrame）；"live"＝沒有推論時，上傳 <video> 當下這張再畫
 function renderVideoGL(source) {
+  if (!RENDER_CAMERA) return;
   if (source === "live") uploadVideoTexture(video);
   else {
     gl.activeTexture(gl.TEXTURE0);
@@ -654,6 +660,8 @@ function frameFailed(err) {
   }
 }
 
+let videoFrameOk = typeof VideoFrame === "function";   // 這個瀏覽器能不能把 VideoFrame 交給 Worker 轉（Worker 回報不行就關掉）
+
 // 把目前這一張畫面交給 Worker。ts＝送出時刻：detectForVideo 的時間戳（必須遞增），也是這張畫面在追蹤與手勢裡的時刻。
 function sendFrame(captureTime) {
   const ts = performance.now();
@@ -662,6 +670,18 @@ function sendFrame(captureTime) {
   const source = forgetTracking ? new ImageData(video.videoWidth || CONFIG.width, video.videoHeight || CONFIG.height) : video;
   forgetTracking = false;
   const blank = source !== video;
+  // 攝影機畫面交給 Worker：支援 WebCodecs 的瀏覽器包成 VideoFrame（只是 GPU 上那一幀的參照，主執行緒幾乎不花時間），由 Worker 自己 createImageBitmap——
+  // 推論吃的照舊是同一張 ImageBitmap。在主執行緒 createImageBitmap(<video>) 要複製整張畫面，量起來是演奏中主執行緒最大的開銷（一半以上），也是長任務的來源。
+  // 不支援（或這一幀包不起來）就退回原本的做法
+  if (!blank && videoFrameOk) {
+    let frame = null;
+    try { frame = new VideoFrame(video, { timestamp: Math.round(ts * 1000) }); } catch { frame = null; }
+    if (frame) {
+      if (isLoopStopped || !poseWorker) { frame.close(); inFlight = null; return; }
+      poseWorker.postMessage({ type: "detect", frame, ts }, [frame]);
+      return;
+    }
+  }
   createImageBitmap(source).then(
     (bitmap) => {
       if (isLoopStopped || !poseWorker) { bitmap.close(); inFlight = null; return; }
@@ -923,6 +943,8 @@ function onPoseWorkerMessage({ data: msg }) {
     handlePoseResult(msg);
   } else if (msg.type === "detectFailed") {
     inFlight = null;
+    // Worker 轉不了 VideoFrame（瀏覽器的 createImageBitmap 不吃它）：之後一律走舊的路徑，這一幀不算失敗
+    if (msg.frameUnsupported) { videoFrameOk = false; console.warn("⚠️ 這個瀏覽器的 Worker 不能轉 VideoFrame，改用主執行緒 createImageBitmap", msg.message); return; }
     frameFailed(new Error(msg.message));
   } else if (msg.type === "configured" || msg.type === "configureFailed") {
     const call = pendingCalls.get(msg.id);

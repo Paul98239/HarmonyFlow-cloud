@@ -32,6 +32,7 @@ self.onmessage = ({ data: msg }) => {
   if (msg.type === 'configure') { self.postMessage({ type: 'configured', id: msg.id, modelIndex: 0 }); return; }
   if (msg.type === 'detect') {
     msg.bitmap?.close?.();
+    msg.frame?.close?.();
     const t = performance.now();
     const landmarks = people.filter((p) => p.present !== false).map((p) => body(p, t));
     setTimeout(() => self.postMessage({ type: 'result', ts: msg.ts, inferMs: 4, landmarks, worldLandmarks: [] }), 4);

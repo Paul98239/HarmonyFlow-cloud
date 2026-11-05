@@ -52,14 +52,21 @@ async function handle(msg) {
       self.postMessage({ type: "configureFailed", id: msg.id, message: String(err?.message ?? err) });
     }
   } else if (msg.type === "detect") {
+    // 主執行緒送 VideoFrame（見 vision.js 的 sendFrame）：在這裡轉成 ImageBitmap，推論吃的跟原本一樣；舊的路徑直接送 ImageBitmap
+    let bitmap = msg.bitmap ?? null;
     try {
+      if (!bitmap && msg.frame) {
+        try { bitmap = await createImageBitmap(msg.frame); }
+        catch (err) { self.postMessage({ type: "detectFailed", ts: msg.ts, frameUnsupported: true, message: String(err?.message ?? err) }); return; }
+        finally { msg.frame.close(); }
+      }
       const t0 = performance.now();
-      const { landmarks, worldLandmarks } = landmarker.detectForVideo(msg.bitmap, msg.ts);
+      const { landmarks, worldLandmarks } = landmarker.detectForVideo(bitmap, msg.ts);
       self.postMessage({ type: "result", ts: msg.ts, inferMs: performance.now() - t0, landmarks, worldLandmarks });
     } catch (err) {
       self.postMessage({ type: "detectFailed", ts: msg.ts, message: String(err?.message ?? err) });
     } finally {
-      msg.bitmap.close();
+      bitmap?.close();
     }
   }
 }

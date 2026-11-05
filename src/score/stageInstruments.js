@@ -12,7 +12,11 @@ import { getReservedBottom, getReservedTop } from './layout.js';
 const FPS = 30;
 const BASE_ALPHA = 0.5;        // 樂器本體的不透明度：它是背景，人（骨架）在它前面
 const MAX_HELD_MS = 12000;     // 沒收到 noteOff 的音（漏掉的事件）最多亮這麼久
-const reduceMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+// 「減少動態效果」：查一次、之後跟著系統設定的變化更新（每幀呼叫 matchMedia 在效能分析裡看得到）
+const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null;
+let reduced = motionQuery?.matches ?? false;
+motionQuery?.addEventListener?.('change', (e) => { reduced = e.matches; });
+const reduceMotion = () => reduced;
 
 export const stats = { frames: 0, totalMs: 0, maxMs: 0 };
 

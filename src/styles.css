@@ -385,6 +385,8 @@ body, html {
   object-fit: cover;
 }
 #overlay-canvas { z-index: 2; }
+/* 攝影機畫面不畫（vision.js 的 RENDER_CAMERA）：WebGL 畫布也不參與合成 */
+#gl-canvas { visibility: hidden; }
 /* 背景的樂器：在黑幕（背景）之上、骨架之下；不吃滑鼠 */
 #instrument-canvas {
   position: absolute;
@@ -625,6 +627,8 @@ body, html {
   height: min(calc(4.4em * var(--lanes)), 36%);
 }
 .score-panel[hidden] { display: none; }
+/* 狀態格的字依每條的實際高度縮放（面板是量得到大小的容器）：舞台小（直立的平板、小視窗）、人多時兩行字還是放得下、不會被切掉 */
+.score-panel { container-type: size; }
 /* 演奏中（樂譜面板出現）頂端的播放 pill 也淡下來，滑鼠移過去或鍵盤焦點進去才全亮：舞台上只留演奏要看的東西 */
 #app-shell:has(#score-panel:not([hidden])) #toolbar-playback:not(:hover):not(:has(:focus-visible)) { opacity: 0.55; }   /* :focus-visible：滑鼠點過的按鈕不算（不然按了 ▶ 之後就一直全亮） */
 .performer-hud { display: flex; flex-direction: column; width: 14em; flex-shrink: 0; }
@@ -636,7 +640,7 @@ body, html {
   /* 舞台是深色：用他自己顏色的淡底色才分得出一格一格（color-mix 不支援的瀏覽器退回暖深棕） */
   background: #21170f; background: color-mix(in srgb, var(--hud-color, #888) 16%, #1a110c);
   border: 2px solid var(--hud-color, var(--border));
-  color: var(--text); font-size: 0.95em; line-height: 1.2; overflow: hidden;
+  color: var(--text); font-size: min(0.95em, calc(100cqh / var(--lanes) / 2.9)); line-height: 1.2; overflow: hidden;
 }
 .hud-chip .hud-line { display: flex; gap: 0.5em; align-items: baseline; white-space: nowrap; }
 .hud-chip .hud-who { font-size: 1.12em; font-weight: 800; color: var(--hud-color, var(--text)); }
@@ -652,7 +656,7 @@ body, html {
 .hud-chip .hud-tip { font-size: 0.8em; color: #ffd79a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hud-chip .hud-tip:empty { display: none; }
 /* 緊湊版（四條以上）：名字一行、狀態一行，提示收起來（滑鼠移上去的 title 還看得到） */
-.score-panel.is-dense .hud-chip { padding: 0.05em 0.55em; line-height: 1.12; }
+.score-panel.is-dense .hud-chip { padding: 0.05em 0.55em; line-height: 1.12; font-size: min(0.95em, calc(100cqh / var(--lanes) / 2.6)); }
 .score-panel.is-dense .hud-chip .hud-who { font-size: 1em; }
 .score-panel.is-dense .hud-chip .hud-state { font-size: 0.92em; }
 .score-panel.is-dense .hud-chip .hud-tip { display: none; }
