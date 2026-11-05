@@ -124,7 +124,7 @@ const updateHumanGate = () => {
 // 觸發一次（main.js 把鍵盤與揮手接到這裡）：輸入事件（keyboard.js、gestureTrigger.js 的 { slot, source, eventTimeMs, receivedMs }）放行這個槽位的下一個 segment。
 // 同步呼叫排程器，這個 segment 的所有音在這次呼叫內就送進合成器（不經計時器）。試聽中、暫停中、還沒載入時排程器沒在播放，trigger() 自己會忽略。
 export function triggerInput(input) {
-  synth.scheduler.trigger(input);
+  guarded('trigger', () => synth.scheduler.trigger(input));
 }
 
 // 演奏模式（每位演奏者一個）：預設「自動」——從起音開始，依演奏情況切到適合他的那一層（見 modeAdvisor.js）；選了固定的模式就不自動切、只給建議。
@@ -161,7 +161,7 @@ export function setExpressions(bySlot = {}) {
 
 // 放開一個鍵（main.js 把鍵盤的 keyup 接到這裡）：輸入事件帶 key（keyboard.js 的 { slot, source, key, eventTimeMs, receivedMs }），收掉登記這個鍵的你的音（keyup 模式，見 scheduler.js 的 lift()）。
 export function liftInput(input) {
-  synth.scheduler.lift(input);
+  guarded('lift', () => synth.scheduler.lift(input));
 }
 
 // 量測（main.js 的 window.__stats 用）：電腦音比排好的時刻晚多少，見 scheduler.js 的 lateStats()。
@@ -513,11 +513,66 @@ function schedulerTick() {
     if (tickLog.length > TICK_LOG_MAX) tickLog.splice(0, TICK_LOG_MAX >> 1);
   }
   lastTickAt = now;
-  synth.scheduler.tick(now, synth.audioNow());
+  try {
+    synth.scheduler.tick(now, synth.audioNow());
+    tickFaults = 0;
+  } catch (err) {
+    reportFault('tick', err);
+    // 連續出錯（排程器的狀態可能壞了）：每 12ms 一次會一直噴、音也可能卡住——先暫停（收掉所有音），按 ▶ 從原處再試
+    if (++tickFaults >= TICK_FAULT_LIMIT) {
+      tickFaults = 0;
+      haltPerformance('⚠️ 演奏出了點狀況，已先暫停；按 ▶ 繼續（一直發生請重新整理頁面）');
+    }
+  }
+}
+
+// ── 防呆：意外的錯誤與外部中斷 ──
+// 錯誤紀錄（__faults() 讀）：觸發、放開、排程 tick、整個頁面沒接住的錯誤。同一處 5 秒內只印一次 console，免得 12ms 一次的 tick 把 console 灌爆
+const FAULT_LOG_MAX = 200, FAULT_PRINT_GAP_MS = 5000, TICK_FAULT_LIMIT = 3;
+const faultLog = [];
+const lastPrinted = new Map();
+let tickFaults = 0;
+export const faults = () => faultLog.slice();
+export function reportFault(where, err) {
+  const now = performance.now();
+  faultLog.push({ at: Math.round(now), where, message: String(err?.message ?? err), stack: err?.stack ?? null });
+  if (faultLog.length > FAULT_LOG_MAX) faultLog.splice(0, FAULT_LOG_MAX >> 1);
+  if (!(now - (lastPrinted.get(where) ?? -Infinity) < FAULT_PRINT_GAP_MS)) { lastPrinted.set(where, now); console.error(`❌ ${where}`, err); }
+}
+// 一次按鍵、揮手出錯只丟掉這一下（不能讓錯誤從 keydown／姿勢回呼往外丟，那條路上後面的人與後面的幀都會跟著斷）
+function guarded(where, fn) {
+  try { return fn(); } catch (err) { reportFault(where, err); return false; }
+}
+
+// 演奏中被迫停下：跟按 ❚❚ 一樣（收掉所有音、位置保留），頂端寫原因。試聽中暫停官方 Sequencer
+function haltPerformance(notice) {
+  const s = playerStore.state;
+  if (s.transport !== 'playing' || isSongLoading) return;
+  try { if (s.mode === 'preview') synth.pausePreview(); else synth.pause(); } catch (err) { reportFault('halt', err); }
+  playerStore.set({ transport: 'paused', notice });
+  updateHumanGate();
+}
+
+// 外部中斷的監聽（startPlayer() 裝一次）：
+//  · 聲音被系統中斷（切換或拔掉耳機、藍牙斷線、來電、iOS 的 Siri）：AudioContext 變成 suspended／interrupted 時合奏還在走、卻沒有聲音，
+//    演奏的人會以為「按了沒反應」一直按——先暫停，按 ▶ 時 play() 會恢復 AudioContext（那是使用者手勢）
+//  · 切到別的分頁或縮小視窗：瀏覽器停掉畫面更新（揮手偵測跟著停）、把計時器降到一秒一次，揮手的人會被當成離開、電腦開始代打——演奏先暫停。試聽只是聽，照樣播
+//  · 頁面層級沒接住的錯誤（Promise 沒有 catch、事件回呼丟出）：記下來，查問題用（__faults()）
+function installGuards() {
+  synth.onAudioStateChange((state) => {
+    if (state === 'suspended' || state === 'interrupted') haltPerformance('🔈 聲音被系統暫停了（例如換耳機、來電），已先暫停；按 ▶ 繼續');
+    else if (state === 'closed') haltPerformance('⚠️ 音訊裝置已關閉，請重新整理頁面');
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && playerStore.state.mode === 'perform') haltPerformance('⏸ 切到別的畫面時演奏已先暫停；回來按 ▶ 繼續');
+  });
+  window.addEventListener('error', (e) => reportFault('window', e.error ?? e.message));
+  window.addEventListener('unhandledrejection', (e) => reportFault('promise', e.reason));
 }
 
 // main.js 呼叫一次；不靠 import 副作用啟動。
 export function startPlayer() {
+  installGuards();
   synth.scheduler.enableEventLog();   // 錄音 v3 的事件串流（pressLog()）：app 一律記，彈完隨時可以匯出
   for (const slot of ALL_SLOTS) synth.scheduler.setMode(slot, modeOf(slot));   // 排程器的模式設定跨載入保留，開機時對齊播放器的預設
   setInterval(uiTick, UI_TICK_MS);

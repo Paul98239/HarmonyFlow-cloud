@@ -28,6 +28,8 @@ window.__stats = () => {
 };
 
 window.__pressLog = midiPlayer.pressLog;
+// __faults()：觸發、排程 tick、頁面層級沒接住的錯誤紀錄（見 midiPlayer.js 的防呆）
+window.__faults = midiPlayer.faults;
 // __view()：每位演奏者目前的模式、狀態、下一下會放出哪些音（scheduler.js 的 viewState()）
 window.__view = midiPlayer.performerView;
 // __scoreViewStats()：樂譜面板每幀畫圖的耗時（主執行緒負擔）

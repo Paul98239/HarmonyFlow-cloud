@@ -333,3 +333,60 @@ SCENARIOS.fivePerformers = async ({ page, url, out }) => {
   await page.mouse.move(640, 300);
   await page.screenshot({ path: `${out}fivePerformers.png` });
 };
+
+// 外部中斷與意外錯誤（防呆）：切到別的分頁、聲音被系統暫停、排程 tick 連續出錯——演奏都先暫停、頂端寫原因，按 ▶ 從原處繼續
+SCENARIOS.interruptions = async ({ page, url, out, errors }) => {
+  // 記下頁面建的 AudioContext，模擬「系統把聲音暫停」（換耳機、來電）用
+  await page.addInitScript(() => {
+    const Orig = window.AudioContext;
+    window.AudioContext = class extends Orig { constructor(...a) { super(...a); window.__testAudioCtx = this; } };
+  });
+  await boot(page, url);
+  await loadLocal(page, out, 'duet');
+  await assignPart(page, 0, 'kb');
+  await closePanel(page);
+  await play(page);
+  const notice = () => page.locator('#midiStatusText').innerText();
+  const pausedWith = async (re, what) => {
+    await page.waitForFunction(() => !document.getElementById('btnPlay').disabled, null, { timeout: 3000 }).catch(() => { throw new Error(`${what}：沒有暫停`); });
+    const t = await notice();
+    if (!re.test(t)) throw new Error(`${what}：頂端寫的是「${t}」`);
+  };
+  const pos = () => page.evaluate(() => window.__view().positionTicks);
+
+  // 1. 切到別的分頁
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+  });
+  await pausedWith(/切到別的畫面/, '切到別的分頁');
+  await play(page);
+
+  // 2. 聲音被系統暫停
+  await page.evaluate(() => window.__testAudioCtx.suspend());
+  await pausedWith(/聲音被系統暫停/, '聲音被暫停');
+  await play(page);
+  const state = await page.evaluate(() => window.__testAudioCtx.state);
+  if (state !== 'running') throw new Error(`按 ▶ 之後 AudioContext 是 ${state}`);
+
+  // 3. 排程 tick 一直出錯：暫停、記進 __faults()；修好之後按 ▶ 從原處繼續、按鍵照常放行
+  const before = await pos();
+  await page.evaluate(async () => {
+    const synth = await import('/src/midi/synth.js');
+    const tick = synth.scheduler.tick;
+    synth.scheduler.tick = () => { throw new Error('測試：排程 tick 出錯'); };
+    window.__restoreTick = () => { synth.scheduler.tick = tick; };
+  });
+  await pausedWith(/出了點狀況/, '排程出錯');
+  const faults = await page.evaluate(() => window.__faults());
+  if (!faults.some((f) => f.where === 'tick')) throw new Error(`__faults() 沒有記到：${JSON.stringify(faults)}`);
+  errors.splice(0, errors.length, ...errors.filter((e) => !/測試：排程 tick 出錯/.test(e)));
+  await page.evaluate(() => window.__restoreTick());
+  await play(page);
+  await page.focus('body');
+  for (let i = 0; i < 3; i++) { await page.keyboard.down('KeyF'); await page.waitForTimeout(200); await page.keyboard.up('KeyF'); await page.waitForTimeout(300); }
+  if (!((await pos()) >= before)) throw new Error('繼續之後位置倒退了');
+  const released = (await pressLog(page)).filter((p) => p.released).length;
+  if (released < 3) throw new Error(`繼續之後按鍵沒放行（放行 ${released} 下）`);
+};

@@ -175,6 +175,7 @@ export async function initEngine() {
       SequencerClass = Sequencer;
 
       audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+      audioCtx.onstatechange = () => audioStateListener?.(audioCtx?.state);
       await audioCtx.audioWorklet.addModule(WORKLET_URL);
 
       // 建構子第二個參數（SynthConfig）刻意不傳：用標準 Web Audio 節點、沒有監聽 spessasynth 內建事件系統，全吃函式庫預設值
@@ -297,11 +298,23 @@ export function reassign(score, assignments) {
   scheduler.reassign(assignments);
 }
 
+// AudioContext 不在跑時恢復：'suspended'（還沒有使用者手勢、或被瀏覽器暫停）與 Safari 的 'interrupted'（來電、Siri、切到別的 app）都要 resume；
+// 'closed' 不能恢復。resume() 在沒有使用者手勢時可能一直不 resolve（Safari），所以最多等 RESUME_WAIT_MS，之後照常播（排程器沒有音訊時鐘時不提早送、不帶時間戳）
+const RESUME_WAIT_MS = 1500;
+async function ensureRunning() {
+  if (!audioCtx || audioCtx.state === 'running' || audioCtx.state === 'closed') return;
+  try { await Promise.race([audioCtx.resume(), new Promise((r) => setTimeout(r, RESUME_WAIT_MS))]); } catch (e) { console.warn('AudioContext 恢復失敗', e); }
+}
+// 音訊狀態改變（'running'／'suspended'／'interrupted'／'closed'）時通知播放器：播放中聲音被系統中斷，播放器先暫停演奏（見 midiPlayer.js）
+let audioStateListener = null;
+export function onAudioStateChange(fn) { audioStateListener = fn; }
+export const audioState = () => audioCtx?.state ?? null;
+
 export async function play() {
   if (isProcessingPlay || !isSongLoaded) return;
   isProcessingPlay = true;
   try {
-    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    await ensureRunning();
     scheduler.play();
   } finally { isProcessingPlay = false; }
 }
@@ -310,7 +323,7 @@ export async function restart() {
   if (isProcessingPlay || !isSongLoaded) return;
   isProcessingPlay = true;
   try {
-    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    await ensureRunning();
     scheduler.restart();
   } finally { isProcessingPlay = false; }
 }
@@ -349,7 +362,7 @@ export async function startPreview(bytes) {
   if (!isReady && !(await initEngine())) throw engineError('音源引擎載入失敗');
   if (!SequencerClass) throw engineError('音源引擎缺少 Sequencer');
   flushPreviousSong();
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  await ensureRunning();
   previewPlayer ??= new PreviewPlayer(() => new SequencerClass(synth));
   previewUsed = true;
   await previewPlayer.start(bytes);
@@ -357,11 +370,11 @@ export async function startPreview(bytes) {
 export function pausePreview() { previewPlayer?.pause(); }
 // 續播／從頭同 play()／restart() 先確保 AudioContext 已恢復；await 期間若換歌（試聽已 stop），PreviewPlayer 自己會忽略這次續播
 export async function resumePreview() {
-  if (audioCtx?.state === 'suspended') await audioCtx.resume();
+  await ensureRunning();
   previewPlayer?.resume();
 }
 export async function restartPreview() {
-  if (audioCtx?.state === 'suspended') await audioCtx.resume();
+  await ensureRunning();
   previewPlayer?.restart();
 }
 export function previewTime() { return previewPlayer?.time ?? 0; }
