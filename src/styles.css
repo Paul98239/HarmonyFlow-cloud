@@ -343,13 +343,14 @@ body, html {
   transform: translate(-50%, -50%);
   z-index: 4;   /* 在樂譜面板（3）之上：人多、條帶變高時「請面向鏡頭」也不會被蓋住 */
   max-width: 90%;
-  font-size: calc(var(--ui-fs) * 1.2);
+  font-size: calc(var(--ui-fs) * 1.55);   /* 舞台上最重要的一句話：長輩在兩三公尺外也要讀得到 */
   font-weight: 700;
-  color: var(--text-dim);
+  color: var(--text);
   padding: 0.6em 1.2em;
   border-radius: var(--radius-lg);
-  background: rgba(0, 0, 0, .55);
-  border: var(--line) solid var(--border);
+  background: rgba(22, 22, 28, .94);
+  border: 2px solid var(--accent);
+  line-height: 1.45;
   text-align: center;
   pointer-events: none;
 }
@@ -589,7 +590,9 @@ body, html {
   height: min(calc(4.4em * var(--lanes)), 36%);
 }
 .score-panel[hidden] { display: none; }
-.performer-hud { display: flex; flex-direction: column; width: 15.5em; flex-shrink: 0; }
+/* 演奏中（樂譜面板出現）頂端的播放 pill 也淡下來，滑鼠移過去或鍵盤焦點進去才全亮：舞台上只留演奏要看的東西 */
+#app-shell:has(#score-panel:not([hidden])) #toolbar-playback:not(:hover):not(:has(:focus-visible)) { opacity: 0.55; }   /* :focus-visible：滑鼠點過的按鈕不算（不然按了 ▶ 之後就一直全亮） */
+.performer-hud { display: flex; flex-direction: column; width: 14em; flex-shrink: 0; }
 .score-canvas { flex: 1 1 auto; min-width: 0; height: 100%; display: block; }
 .hud-chip {
   flex: 1 1 0; min-height: 0; box-sizing: border-box;
@@ -601,15 +604,17 @@ body, html {
   color: var(--text); font-size: 0.95em; line-height: 1.2; overflow: hidden;
 }
 .hud-chip .hud-line { display: flex; gap: 0.5em; align-items: baseline; white-space: nowrap; }
-.hud-chip .hud-who { font-weight: 800; color: var(--hud-color, var(--text)); }
-.hud-chip .hud-mode { font-size: 0.82em; opacity: 0.85; }
-.hud-chip .hud-state { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hud-chip .hud-who { font-size: 1.12em; font-weight: 800; color: var(--hud-color, var(--text)); }
+/* 模式是一個小標籤；帶頭的人那一格框線加粗（不用另外寫字） */
+.hud-chip .hud-mode { font-size: 0.78em; font-weight: 700; padding: 0 0.45em; border-radius: 999px; border: 1px solid currentColor; opacity: 0.8; }
+.hud-chip.is-leader { border-width: 3px; }
+.hud-chip .hud-state { font-size: 1.05em; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hud-chip[data-state="behind"] { background: #3a2508; }
 .hud-chip[data-state="substitute"] { background: #3a1212; }
 .hud-chip[data-state="behind"] .hud-state { color: #ffb347; }
 .hud-chip[data-state="substitute"] .hud-state { color: #ff8080; }
-.hud-chip[data-state="resting"] .hud-state, .hud-chip[data-state="waiting"] .hud-state { color: #9ad; }
-.hud-chip .hud-tip { font-size: 0.75em; color: #ffe08a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hud-chip[data-state="resting"] .hud-state, .hud-chip[data-state="waiting"] .hud-state { color: #c8c8d0; }
+.hud-chip .hud-tip { font-size: 0.8em; color: #ffe08a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hud-chip .hud-tip:empty { display: none; }
 
 /* 跑馬燈（.mq）：文字超出欄位寬度時頭尾相連 loop，放得下就一動不動。

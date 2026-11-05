@@ -201,3 +201,31 @@
   - 舞台提示（請面向鏡頭…）的層級提到面板之上。
 - 替代：骨架照原位、面板改成全透明。放棄：手在最低點時跟樂譜的音條疊在一起，兩邊都看不清楚。
 - 測試：端到端 `skeletonClearOfPanel`（兩個人深揮、四條樂譜時，骨架沒有任何像素畫到面板底下或工具列底下）。
+
+## 整體 UI 優化（減少凌亂）
+
+參考的原則（網路上的設計指引與研究，數字只當起點，要實機驗證）：
+- 給長輩的介面：減少畫面上的元素、一次只呈現需要的資訊；文字夠大（桌機約 24pt 以上）、對比至少 4.5:1；重要的狀態不要用藍色（容易看起來褪色）。來源：[uxdesign.cc：A guide to interface design for older adults](https://uxdesign.cc/a-guide-to-interface-design-for-older-adults-31109468d46d)、[UX Planet：Designing for older people](https://uxplanet.org/ux-study-designing-for-older-people-6c67575d9c2f)、[Adchitects：guide to interface design for older adults](https://adchitects.co/blog/guide-to-interface-design-for-older-adults)。
+- 音樂遊戲的 HUD：眼睛盯在一小塊區域，資訊要放在周邊視覺看得到的地方、不要讓視線在畫面兩端來回；只留玩家需要的東西，情境資訊需要時才出現；多人時不要把音軌縮到看不清。來源：[Game Developer：Designing HUDs for peripheral vision](https://gamedeveloper.com/design/perceiving-without-looking-designing-huds-for-peripheral-vision)、[Game Developer：Rock Band 3 HUD Analysis](https://www.gamedeveloper.com/design/rock-band-3-hud-analysis)、[Bugnet：How to design a readable HUD](https://bugnet.io/blog/how-to-design-a-readable-hud)。
+- 長輩的體感遊戲：互動與回饋要簡單直接。來源：[Gerling 等：Full-body motion-based game interaction for older adults](https://typeset.io/pdf/full-body-motion-based-game-interaction-for-older-adults-3bp52d3f0h.pdf)。
+
+### D5-1 提示放在人身上
+- 「ID n」文字改成頭頂一顆他自己顏色的號碼徽章（直徑至少 26px）。徽章外圈是「下一下」的提示：離下一下 1.5 秒內開始慢慢填滿、落後時橘色閃動、電腦代打中紅色、休息／等待灰色。揮手的人盯著自己的骨架就知道什麼時候該揮，不必在人和底下的樂譜之間來回看。
+- 樂譜面板保留：它看得到更遠的未來（5 秒），也是 PC 鍵盤手（沒有骨架）唯一的提示。
+
+### D5-2 骨架減法
+- 頭改成一個圓；拿掉五官的點、嘴巴三角形與頭部光暈；情緒框只留四個角（拿掉底色）。手球（揮中時的光環）保留：那是「我在控制」最直接的回饋。
+
+### D5-3 面板減法
+- 狀態格：名字＋目前的模式（小標籤）一行、狀態一行（字放大），提示只有在有建議或剛切換時才出現，用短句（完整說明放在滑鼠提示）；「自動」「帶頭」不再寫字（帶頭的人框線加粗）。
+- 樂譜：拍線只畫給拍子模式的人；之後的音退一階、下一下最亮；休息／等待改中性灰（原本是藍）。
+
+### D5-4 外框
+- 演奏中（樂譜面板出現）播放 pill 也淡到 0.55，滑鼠移過去或用鍵盤移到上面才全亮；控制列原本就會淡出。
+- 舞台中央的提示（例如「請面向鏡頭」）放大到 1.55 倍、白字深底、黃色框。
+
+### D5-5 沒做的
+- 讓使用者自己調整字級：原本的 `--ui-fs` 已經依螢幕寬度與瀏覽器縮放調整，Ctrl +/- 也有效，所以沒有另外做設定。
+- 換整套視覺風格（字型、配色系統）：目前的黃色強調色與深色底已經是高對比的組合，這次只做減法與層級，不換品牌樣式。
+
+量測（4 個模擬的人揮手）：視覺每幀平均 1.0ms、骨架繪製 0.37ms、樂譜面板 0.15ms，沒有長任務，跟改版前同一個量級。

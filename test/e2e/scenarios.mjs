@@ -299,4 +299,13 @@ SCENARIOS.skeletonClearOfPanel = async ({ page, url, out }) => {
     // ID 標籤可能貼著工具列下緣；只允許極少量的標籤描邊
     if (r.above > 50) throw new Error(`骨架鑽到頂端工具列底下：${JSON.stringify(r)}`);
   }
+  // 演奏中播放 pill 淡下來（滑鼠移開之後），滑鼠移回來全亮
+  await page.mouse.move(640, 400);
+  await page.waitForTimeout(500);
+  const dim = await page.evaluate(() => Number(getComputedStyle(document.getElementById('toolbar-playback')).opacity));
+  if (!(dim < 0.8)) throw new Error(`演奏中播放 pill 沒有淡下來：${dim}`);
+  await page.hover('#btnPause');
+  await page.waitForTimeout(500);
+  const lit = await page.evaluate(() => Number(getComputedStyle(document.getElementById('toolbar-playback')).opacity));
+  if (!(lit > 0.95)) throw new Error(`滑鼠移到播放 pill 上沒有全亮：${lit}`);
 };

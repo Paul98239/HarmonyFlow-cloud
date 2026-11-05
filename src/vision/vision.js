@@ -42,9 +42,6 @@ export function warmPoseModel() {
 const BONE_WIDTH = 2;      // 骨架連線寬度（px）
 const JOINT_RADIUS = 2;    // 關節圓點半徑（px）
 const TAU = Math.PI * 2;
-// 嘴巴中點正下方的虛擬「下巴」節點偏移量：以肩寬為單位（同 ArcDetector 門檻、ID 標籤字級的慣例），人離鏡頭遠近不同時比例才一致。
-// 原本 0.18 是在混合單位下訂的（肩寬以畫面寬、往下的距離以畫面高為單位），2026-10-28 換成同一把尺時乘上 16:9 的 0.5625，畫出來的位置不變
-const CHIN_OFFSET_RATIO = 0.10;
 
 const FRAME_ERROR_THRESHOLD = 90; // 連續幾幀處理失敗才判定為持續性錯誤並顯示錯誤畫面（約 1.5~3 秒）
 
@@ -376,32 +373,25 @@ function virtualNeckPoint(lm) {
   return { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 };
 }
 
-// 嘴巴兩節點中點下方的虛擬「下巴」節點，供骨架畫成倒三角形（見 renderSkeletonOverlay()）。shoulderWidth 以畫面寬為單位，往下的距離除以 aspect 換回以畫面高為單位。
-function virtualChinPoint(lm, shoulderWidth, aspect) {
-  const left = lm[9], right = lm[10];
-  if (!(left.visible ?? true) || !(right.visible ?? true)) return null;
-  return {
-    x: (left.x + right.x) / 2,
-    y: (left.y + right.y) / 2 + CHIN_OFFSET_RATIO * shoulderWidth / aspect,
-  };
-}
-
-// 精簡骨架只畫手臂鏈（肩-肘-手腕-手掌）＋臉部簡化輪廓，不畫全身連線（髖／膝／踝／腳掌沒有被任何手勢或播放邏輯讀取）。
+// 精簡骨架只畫手臂鏈（肩-肘-手腕-手掌）＋頭一個圓，不畫全身連線（髖／膝／踝／腳掌沒有被任何手勢或播放邏輯讀取）。
 // 手照 MediaPipe 原本的節點與連線（POSE_CONNECTIONS 的手部那幾條）：手腕、小指、食指、拇指各一點，兩隻手都畫。
 const ARM_CONNECTIONS = [
   [MP_LEFT_SHOULDER, MP_LEFT_ELBOW], [MP_RIGHT_SHOULDER, MP_RIGHT_ELBOW],
   [13, 15], [15, 17], [15, 19], [15, 21], [17, 19],
   [14, 16], [16, 18], [16, 20], [16, 22], [18, 20],
 ];
-const ARM_JOINTS = [MP_LEFT_SHOULDER, MP_RIGHT_SHOULDER, MP_LEFT_ELBOW, MP_RIGHT_ELBOW, 15, 16, 17, 18, 19, 20, 21, 22];
-// 臉部只標關鍵五官：雙眼（2/5）、鼻子（0）各畫一個獨立節點、不連線；嘴巴兩節點（9/10）加上虛擬下巴節點（virtualChinPoint()）連成倒三角形。
-const MOUTH_PAIR = [9, 10];
 
 // ─── 骨架繪製（裝飾）────────────────────────────────────────────────────────────
 // 每個人：骨頭先畫一層寬而淡的光暈、再畫細的實線（不用 shadowBlur：那是逐像素模糊，很貴）；粗細依這個人在畫面上的大小（尺度）縮放；
 // 手腕是兩顆「手球」，大小跟著他上一下的力道，揮中的那一刻往外擴一圈光環；頭上一圈光暈；外面一個情緒框（四個角的括號＋很淡的底色），
 // 框往外留白、光暈的寬度與亮度都跟著表情 energy 變。一個人約十次繪圖呼叫（__skeletonStats() 量每幀的耗時）。
 const FLASH_MS = 380;                       // 揮中時手的光環持續多久
+const HEAD_RADIUS = 0.32;                   // 頭的圓（肩寬的倍數）
+const BADGE_MIN_R = 13, BADGE_MAX_R = 26;   // ID 徽章半徑（像素）：直徑至少 26px
+const CUE_LEAD_SEC = 1.5;                   // 下一下前多久開始填徽章外圈
+// 每位演奏者的提示（main.js 給：() => Map<ID, { state, dueInSec }>，沒有指派或沒在演奏就沒有）
+let performerCues = null;
+export function setPerformerCues(fn) { performerCues = typeof fn === "function" ? fn : null; }
 // 骨架畫在頂端工具列與樂譜面板之間：攝影機畫面是黑幕，骨架不必對齊影像，整個鏡頭範圍等比例縮到這一段（水平置中），面板出現、消失時平滑縮放（不跳）
 let drawScale = 1, drawTop = 0;
 const DRAW_SCALE_TAU_MS = 250;
@@ -425,8 +415,6 @@ function drawEmotionBox(track, rgb, W, H, e) {
   const sc = track.scale * W;
   const pad = sc * (0.15 + 0.55 * e);
   const x = b.x0 * W - pad, y = b.y0 * H - pad, w = (b.x1 - b.x0) * W + 2 * pad, h = (b.y1 - b.y0) * H + 2 * pad;
-  ctx2d.fillStyle = rgbaOf(rgb, 0.05 + 0.08 * e);   // 黑幕上的底色：太淡等於看不到
-  ctx2d.fillRect(x, y, w, h);
   const c = Math.min(w, h) * 0.2;
   ctx2d.strokeStyle = rgbaOf(rgb, 0.5 + 0.5 * e);
   ctx2d.lineWidth = 2 + 4 * e;
@@ -476,11 +464,9 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
     // 低可見度（遮擋/猜測）的關節不繪製。visible 由 tracking.js 算好（可見度先 EMA 平滑、再套遲滯門檻），這裡不自己比門檻，否則邊緣關節會逐幀閃爍。
     const lm = track.smoothed;
     const ls = lm[MP_LEFT_SHOULDER], rs = lm[MP_RIGHT_SHOULDER];
-    const shoulderWidth = Math.hypot(ls.x - rs.x, (ls.y - rs.y) * track.aspect);
     const sc = Math.max(20, track.scale * W);                 // 這個人的大小（像素）
     const core = Math.max(BONE_WIDTH, sc * 0.035);
     const neck = virtualNeckPoint(lm);
-    const chin = virtualChinPoint(lm, shoulderWidth, track.aspect);
 
     const bones = new Path2D();
     for (const [a, b] of ARM_CONNECTIONS) {
@@ -493,12 +479,6 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
       bones.moveTo(ls.x * W, ls.y * H); bones.lineTo(neck.x * W, neck.y * H);
       bones.moveTo(rs.x * W, rs.y * H); bones.lineTo(neck.x * W, neck.y * H);
     }
-    if (chin) {
-      const mLeft = lm[MOUTH_PAIR[0]], mRight = lm[MOUTH_PAIR[1]];
-      bones.moveTo(mLeft.x * W, mLeft.y * H); bones.lineTo(mRight.x * W, mRight.y * H);
-      bones.moveTo(mRight.x * W, mRight.y * H); bones.lineTo(chin.x * W, chin.y * H);
-      bones.moveTo(chin.x * W, chin.y * H); bones.lineTo(mLeft.x * W, mLeft.y * H);
-    }
     ctx2d.lineCap = 'round';
     ctx2d.strokeStyle = rgbaOf(rgb, 0.16 + 0.26 * e);         // 光暈：越有活力越寬越亮
     ctx2d.lineWidth = core * (2.6 + 2.4 * e);
@@ -507,17 +487,19 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
     ctx2d.lineWidth = core;
     ctx2d.stroke(bones);
 
-    // 頭的光暈：鼻子為中心、約半個肩寬
+    // 頭：一個圓（鼻子為中心、約 1/3 肩寬），不畫五官的點與嘴巴三角形——黑幕上只有骨架，細碎的點只會讓畫面亂
     const nose = lm[0];
     if (nose && (nose.visible ?? true)) {
       ctx2d.beginPath();
-      ctx2d.arc(nose.x * W, nose.y * H, sc * 0.42, 0, TAU);
-      ctx2d.strokeStyle = rgbaOf(rgb, 0.25 + 0.35 * e);
-      ctx2d.lineWidth = core * 0.8;
+      ctx2d.arc(nose.x * W, nose.y * H, sc * HEAD_RADIUS, 0, TAU);
+      ctx2d.fillStyle = rgbaOf(rgb, 0.14);
+      ctx2d.fill();
+      ctx2d.strokeStyle = color;
+      ctx2d.lineWidth = core;
       ctx2d.stroke();
     }
 
-    // 關節點：手臂鏈（含手腕與手掌三點）、脖子、下巴；雙眼與鼻子各畫一個獨立節點、不連線。
+    // 關節點：肩、肘、脖子（手腕與手掌由手球表示）
     const joints = new Path2D();
     const jr = Math.max(JOINT_RADIUS, core * 0.9);
     const addJoint = (x, y, radius) => {
@@ -525,14 +507,12 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
       joints.moveTo(x + radius, y);
       joints.arc(x, y, radius, 0, TAU);
     };
-    // 0=鼻子、2=左眼中心、5=右眼中心、9/10=嘴角（見 MOUTH_PAIR）。
-    for (const i of [...ARM_JOINTS, 0, 2, 5, MOUTH_PAIR[0], MOUTH_PAIR[1]]) {
+    for (const i of [MP_LEFT_SHOULDER, MP_RIGHT_SHOULDER, MP_LEFT_ELBOW, MP_RIGHT_ELBOW]) {
       const p = lm[i];
       if (!(p.visible ?? true)) continue;
       addJoint(p.x * W, p.y * H, jr);
     }
     if (neck) addJoint(neck.x * W, neck.y * H, jr);
-    if (chin) addJoint(chin.x * W, chin.y * H, jr);
     ctx2d.fillStyle = color;
     ctx2d.fill(joints);
 
@@ -563,14 +543,18 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
 
   ctx2d.restore();
 
-  // ID 標籤在鏡像轉換之外繪製（否則文字會左右反轉），座標手動換算成鏡像後的螢幕座標
+  // ID 徽章（在鏡像轉換之外畫，數字才不會左右反轉；座標手動換算成鏡像＋縮放後的螢幕座標）：頭頂上一顆他自己顏色的圓、裡面是他的號碼。
+  // 徽章外圈是「下一下」的提示（setPerformerCues）：快輪到他時一圈慢慢填滿、落後時橘色閃動、電腦代打中紅色、休息／等待灰色。
+  // 提示放在人身上，眼睛不必在人與底下的樂譜之間來回找。
   ctx2d.save();
   ctx2d.beginPath();
   ctx2d.rect(0, bandTop, W, bandH);
   ctx2d.clip();
   ctx2d.textAlign = "center";
-  ctx2d.textBaseline = "bottom";
-  ctx2d.strokeStyle = "rgba(0,0,0,.75)";
+  ctx2d.textBaseline = "middle";
+  let cues = null;
+  try { cues = performerCues?.() ?? null; } catch { cues = null; }
+  const pulse = 0.5 + 0.5 * Math.sin(nowMs / 140);
 
   for (const track of activeTracks) {
     const color = POSE_COLORS[track.slot % POSE_COLORS.length];
@@ -580,24 +564,41 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
       ? head
       : lm.find((p, i) => isFacePoint(i) && (p.visible ?? true));
     if (!anchor) continue;
+    const scPx = ds * Math.max(20, track.scale * W);                       // 畫出來的肩寬（像素）
+    const R = Math.max(BADGE_MIN_R, Math.min(BADGE_MAX_R, scPx * 0.26));   // 徽章半徑：下限讓長輩在兩三公尺外也看得清楚號碼
+    const hx = W / 2 + ds * ((1 - anchor.x) * W - W / 2), hy = oy + ds * anchor.y * H;
+    const cx = hx, cy = Math.max(bandTop + R + 4, hy - scPx * HEAD_RADIUS - R * 1.25);
 
-    // 以肩寬換算此人在畫面上的尺度，讓字級隨遠近縮放；範圍收窄避免忽大忽小
-    // 字級跟著畫出來的大小（縮到面板上方之後的肩寬 × ds）：人多、人被縮小時標籤不會互相疊在一起
-    const shoulderWidthPx = ds * Math.hypot((lm[11].x - lm[12].x) * W, (lm[11].y - lm[12].y) * H);
-    const fontSizePx = Math.max(18, Math.min(36, shoulderWidthPx * 0.45));   // 下限 18px：長輩站在兩三公尺外也要看得清楚自己的 ID
-    const headTopOffsetPx = Math.max(fontSizePx * 1.3, shoulderWidthPx * 0.7); // 眼睛到頭頂的估計距離
-
-    // 鏡像＋跟骨架一樣縮到面板上方（ds，見上）
-    const sx = W / 2 + ds * ((1 - anchor.x) * W - W / 2);
-    const sy = Math.max(bandTop + fontSizePx + 2, oy + ds * anchor.y * H - headTopOffsetPx / 2);   // headTopOffsetPx 已經是縮小後的像素   // 眼睛與頭頂的中點；頭頂在畫面外時貼著上緣，不被切掉
-
-    ctx2d.font = `bold ${fontSizePx.toFixed(0)}px Consolas, monospace`;
-    ctx2d.lineWidth = Math.max(3, fontSizePx * 0.12);
-
-    const label = `ID ${track.id}`;
+    const cue = cues?.get(track.id);
+    if (cue) {
+      const ringR = R + Math.max(4, R * 0.35), lw = Math.max(3, R * 0.28);
+      let ringColor = '#ffffff', frac = 1, alpha = 0.9;
+      if (cue.state === 'behind') { ringColor = '#ffa53a'; alpha = 0.55 + 0.45 * pulse; }
+      else if (cue.state === 'substitute') ringColor = '#ff6b6b';
+      else if (cue.state === 'resting' || cue.state === 'waiting' || cue.state === 'done') { ringColor = '#8a8a92'; alpha = 0.7; }
+      else frac = Number.isFinite(cue.dueInSec) ? Math.min(1, Math.max(0, 1 - cue.dueInSec / CUE_LEAD_SEC)) : 0;
+      ctx2d.beginPath();
+      ctx2d.arc(cx, cy, ringR, 0, TAU);
+      ctx2d.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx2d.lineWidth = lw;
+      ctx2d.stroke();
+      if (frac > 0) {
+        ctx2d.beginPath();
+        ctx2d.arc(cx, cy, ringR, -Math.PI / 2, -Math.PI / 2 + frac * TAU);
+        ctx2d.strokeStyle = ringColor;
+        ctx2d.globalAlpha = alpha;
+        ctx2d.lineCap = 'round';
+        ctx2d.stroke();
+        ctx2d.globalAlpha = 1;
+      }
+    }
+    ctx2d.beginPath();
+    ctx2d.arc(cx, cy, R, 0, TAU);
     ctx2d.fillStyle = color;
-    ctx2d.strokeText(label, sx, sy);
-    ctx2d.fillText(label, sx, sy);
+    ctx2d.fill();
+    ctx2d.fillStyle = '#111';
+    ctx2d.font = `800 ${Math.round(R * 1.25)}px system-ui, sans-serif`;
+    ctx2d.fillText(String(track.id), cx, cy + R * 0.05);
   }
 
   ctx2d.restore();

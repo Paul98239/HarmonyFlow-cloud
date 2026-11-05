@@ -2,7 +2,7 @@
 
 import * as midiPlayer from './midi/midiPlayer.js';
 import { initUi, setLoadingStatus, dismissLoading, showError } from './ui.js';
-import { startVision, setPoseCountListener, setPerformanceStateListener, warmPoseModel, visionLog, visionFrameStats, getCameraInfo, setFrameLogRecording, clearFrameLog, skeletonStats, setAttentionHint } from './vision/vision.js';
+import { startVision, setPoseCountListener, setPerformanceStateListener, warmPoseModel, visionLog, visionFrameStats, getCameraInfo, setFrameLogRecording, clearFrameLog, skeletonStats, setAttentionHint, setPerformerCues } from './vision/vision.js';
 import { startKeyboardTrigger, getInputDelays } from './input/keyboard.js';
 import { createGestureTrigger } from './input/gestureTrigger.js';
 import { summarizeMs } from './midi/tempo.js';
@@ -126,6 +126,19 @@ async function bootSystem() {
 
   startPerformerHud({ getView: midiPlayer.performerView, isActive: midiPlayer.isPerforming, subscribeMode: (fn) => midiPlayer.onPerformanceEvent('mode', fn) });
   startScoreView({ getView: midiPlayer.performerView, getStatic: midiPlayer.scoreStatic, isActive: midiPlayer.isPerforming });
+  // 骨架頭上的 ID 徽章外圈：每位揮手的演奏者的狀態與「離下一下還有幾秒」（vision.js 每幀讀）
+  setPerformerCues(() => {
+    if (!midiPlayer.isPerforming()) return null;
+    const v = midiPlayer.performerView(), score = midiPlayer.scoreOf();
+    if (!score) return null;
+    const cues = new Map();
+    for (const p of v.performers) {
+      if (typeof p.slot !== 'number') continue;
+      const due = p.next.pressTicks === null ? Infinity : (score.midiTicksToSeconds(p.next.pressTicks) - v.positionSec) / (v.rate || 1);   // 拍子模式是拍線
+      cues.set(p.slot, { state: p.state, dueInSec: due });
+    }
+    return cues;
+  });
 
   // 視覺初始化失敗時錯誤畫面已經顯示，載入畫面不收、inert 也維持
   if (!visionOk) return;

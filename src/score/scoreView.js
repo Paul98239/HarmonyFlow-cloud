@@ -96,15 +96,18 @@ function draw(ctx, { w: W, h: H, dpr }, view, stat, nowMs) {
     if (lh < 8 * dpr) continue;   // 版面還沒量好（剛顯示、還沒 resize）時條高可能是 0 或負的
     // 底色：代打中泛紅、落後泛橘、休息／等待泛藍
     // 底色：舞台是黑幕，半透明黑等於沒畫，所以用他自己顏色的淡底色；代打中泛紅、落後泛橘、休息／等待泛藍（都比正常亮，一眼看得出來）
-    ctx.fillStyle = v.state === 'substitute' ? 'rgba(200,50,50,0.32)' : v.state === 'behind' ? 'rgba(230,140,20,0.3)' : v.state === 'resting' || v.state === 'waiting' ? 'rgba(60,110,200,0.25)' : rgba(rgb, 0.1);
+    // 休息／等待用中性灰（藍色在長輩眼裡容易顯得褪色、看不出來）
+    ctx.fillStyle = v.state === 'substitute' ? 'rgba(200,50,50,0.32)' : v.state === 'behind' ? 'rgba(230,140,20,0.3)' : v.state === 'resting' || v.state === 'waiting' ? 'rgba(140,140,150,0.18)' : rgba(rgb, 0.1);
     ctx.fillRect(0, y0, W, lh);
     ctx.strokeStyle = rgba(rgb, v.isLeader ? 1 : 0.7);
     ctx.lineWidth = (v.isLeader ? 3 : 1.5) * dpr;
     ctx.strokeRect(0.5, y0 + 0.5, W - 1, lh - 1);
-    // 拍線（拍子模式的人看得清楚一點）
+    // 拍線只畫給拍子模式的人（他照拍子揮）；其他模式看音就好，多一排線只是雜訊
     const beats = stat.beatSec;
-    ctx.fillStyle = v.mode === 'beat' ? rgba(rgb, 0.5) : 'rgba(255,255,255,0.16)';
-    for (let b = lowerBound(beats, visLo); b < beats.length && beats[b] <= visHi; b++) ctx.fillRect(Math.round(xOf(beats[b])), y0, Math.max(1, dpr), lh);
+    if (v.mode === 'beat') {
+      ctx.fillStyle = rgba(rgb, 0.45);
+      for (let b = lowerBound(beats, visLo); b < beats.length && beats[b] <= visHi; b++) ctx.fillRect(Math.round(xOf(beats[b])), y0, Math.max(1, dpr), lh);
+    }
     // 音：音高縮放到這條的高度
     const pad = 5 * dpr, inner = lh - 2 * pad, range = Math.max(6, L.hi - L.lo);
     const barH = Math.max(3 * dpr, Math.min(12 * dpr, inner / (range + 1)));
@@ -117,7 +120,7 @@ function draw(ctx, { w: W, h: H, dpr }, view, stat, nowMs) {
       const seg = L.seg[k];
       const played = seg < v.cursor && seg < from;
       const isNext = seg >= from && seg < to;
-      ctx.fillStyle = played ? rgba(rgb, 0.38) : isNext ? rgba(rgb, 1) : rgba(rgb, 0.75);
+      ctx.fillStyle = played ? rgba(rgb, 0.3) : isNext ? rgba(rgb, 1) : rgba(rgb, 0.62);   // 視線集中在下一下：之後的音退一階
       const y = yOf(L.pitch[k]);
       ctx.fillRect(x, y, x2 - x, barH);
       if (isNext) { ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = dpr; ctx.strokeRect(x - 0.5, y - 0.5, x2 - x + 1, barH + 1); }
