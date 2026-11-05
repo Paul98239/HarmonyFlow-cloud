@@ -7,6 +7,7 @@ import {
 } from "./gesture.js";
 import { ExpressionTracker } from "./expression.js";
 import { POSE_COLORS } from "../score/palette.js";
+import { getReservedBottom, getReservedTop } from "../score/layout.js";
 
 const CONFIG = {
   // 攝影機解析度與幀率的「上限」（getUserMedia 用 max 而非只給 ideal）：外接攝影機的原生模式常是 1080p60，真的拿到會讓每幀多搬四倍像素、rVFC 一秒觸發 60 次推論，多數機器跟不上；
@@ -401,6 +402,11 @@ const MOUTH_PAIR = [9, 10];
 // 手腕是兩顆「手球」，大小跟著他上一下的力道，揮中的那一刻往外擴一圈光環；頭上一圈光暈；外面一個情緒框（四個角的括號＋很淡的底色），
 // 框往外留白、光暈的寬度與亮度都跟著表情 energy 變。一個人約十次繪圖呼叫（__skeletonStats() 量每幀的耗時）。
 const FLASH_MS = 380;                       // 揮中時手的光環持續多久
+// 骨架畫在頂端工具列與樂譜面板之間：攝影機畫面是黑幕，骨架不必對齊影像，整個鏡頭範圍等比例縮到這一段（水平置中），面板出現、消失時平滑縮放（不跳）
+let drawScale = 1, drawTop = 0;
+const DRAW_SCALE_TAU_MS = 250;
+const DRAW_TOP_MARGIN = 0.07;   // 畫面高度的比例
+let lastDrawMs = null;
 const triggerFlash = [];                    // 槽位 → { at, hand: 'left'|'right'|'both', intensity }
 export const skeletonStats = { frames: 0, totalMs: 0, maxMs: 0 };
 const hexRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
@@ -421,11 +427,11 @@ function drawEmotionBox(track, rgb, W, H, e) {
   const sc = track.scale * W;
   const pad = sc * (0.15 + 0.55 * e);
   const x = b.x0 * W - pad, y = b.y0 * H - pad, w = (b.x1 - b.x0) * W + 2 * pad, h = (b.y1 - b.y0) * H + 2 * pad;
-  ctx2d.fillStyle = rgbaOf(rgb, 0.02 + 0.045 * e);
+  ctx2d.fillStyle = rgbaOf(rgb, 0.05 + 0.08 * e);   // 黑幕上的底色：太淡等於看不到
   ctx2d.fillRect(x, y, w, h);
   const c = Math.min(w, h) * 0.2;
-  ctx2d.strokeStyle = rgbaOf(rgb, 0.35 + 0.55 * e);
-  ctx2d.lineWidth = 1.5 + 4 * e;
+  ctx2d.strokeStyle = rgbaOf(rgb, 0.5 + 0.5 * e);
+  ctx2d.lineWidth = 2 + 4 * e;
   ctx2d.lineCap = 'round';
   const corners = new Path2D();
   for (const [cx, cy, dx, dy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]]) {
@@ -443,9 +449,25 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
   ctx2d.clearRect(0, 0, W, H);
   if (activeTracks.length === 0) return;
 
+  // 縮放到面板上方：目標比例＝1 − 面板佔的比例，往目標平滑靠近
+  const top = getReservedTop(), target = Math.max(0.3, 1 - top - getReservedBottom());
+  const dt = lastDrawMs === null ? Infinity : Math.max(0, nowMs - lastDrawMs);
+  lastDrawMs = nowMs;
+  const k = Math.exp(-dt / DRAW_SCALE_TAU_MS);
+  drawScale = target + (drawScale - target) * k;
+  drawTop = top + (drawTop - top) * k;
+  // 頭的光暈與情緒框會畫到這個人的節點外面一點：上緣再留 DRAW_TOP_MARGIN 給它們；超出這一段（工具列與面板之間）的一律裁掉
+  const bandTop = drawTop * H, bandH = drawScale * H, margin = Math.min(DRAW_TOP_MARGIN * H, bandH * 0.2);
+  const ds = (bandH - margin) / H, oy = bandTop + margin;
+
   ctx2d.save();
-  ctx2d.translate(W, 0);
-  ctx2d.scale(-1, 1); // 水平鏡像（與 WebGL shader 一致）
+  ctx2d.beginPath();
+  ctx2d.rect(0, bandTop, W, bandH);
+  ctx2d.clip();
+  // 水平鏡像（與 WebGL shader 一致）＋等比例縮小、往下移到工具列下方：x → W/2 − ds·(x − W/2)、y → oy + ds·y
+  ctx2d.translate(W / 2, oy);
+  ctx2d.scale(-ds, ds);
+  ctx2d.translate(-W / 2, 0);
   ctx2d.lineJoin = 'round';
 
   for (const track of activeTracks) {
@@ -545,6 +567,9 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
 
   // ID 標籤在鏡像轉換之外繪製（否則文字會左右反轉），座標手動換算成鏡像後的螢幕座標
   ctx2d.save();
+  ctx2d.beginPath();
+  ctx2d.rect(0, bandTop, W, bandH);
+  ctx2d.clip();
   ctx2d.textAlign = "center";
   ctx2d.textBaseline = "bottom";
   ctx2d.strokeStyle = "rgba(0,0,0,.75)";
@@ -559,12 +584,14 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
     if (!anchor) continue;
 
     // 以肩寬換算此人在畫面上的尺度，讓字級隨遠近縮放；範圍收窄避免忽大忽小
-    const shoulderWidthPx = Math.hypot((lm[11].x - lm[12].x) * W, (lm[11].y - lm[12].y) * H);
-    const fontSizePx = Math.max(18, Math.min(36, shoulderWidthPx * 0.4));
+    // 字級跟著畫出來的大小（縮到面板上方之後的肩寬 × ds）：人多、人被縮小時標籤不會互相疊在一起
+    const shoulderWidthPx = ds * Math.hypot((lm[11].x - lm[12].x) * W, (lm[11].y - lm[12].y) * H);
+    const fontSizePx = Math.max(13, Math.min(36, shoulderWidthPx * 0.45));
     const headTopOffsetPx = Math.max(fontSizePx * 1.3, shoulderWidthPx * 0.7); // 眼睛到頭頂的估計距離
 
-    const sx = (1 - anchor.x) * W;                  // 水平鏡像
-    const sy = Math.max(fontSizePx + 2, anchor.y * H - headTopOffsetPx / 2);   // 眼睛與頭頂的中點；頭頂在畫面外時貼著上緣，不被切掉
+    // 鏡像＋跟骨架一樣縮到面板上方（ds，見上）
+    const sx = W / 2 + ds * ((1 - anchor.x) * W - W / 2);
+    const sy = Math.max(bandTop + fontSizePx + 2, oy + ds * anchor.y * H - headTopOffsetPx / 2);   // headTopOffsetPx 已經是縮小後的像素   // 眼睛與頭頂的中點；頭頂在畫面外時貼著上緣，不被切掉
 
     ctx2d.font = `bold ${fontSizePx.toFixed(0)}px Consolas, monospace`;
     ctx2d.lineWidth = Math.max(3, fontSizePx * 0.12);

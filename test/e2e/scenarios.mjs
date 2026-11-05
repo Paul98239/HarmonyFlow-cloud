@@ -265,3 +265,38 @@ SCENARIOS.ghostIds = async ({ page, url, out }) => {
   if (!(p1.cursor > 3)) throw new Error(`在場的演奏者 1 沒有在演奏：${JSON.stringify(p1)}`);
   if (p3.state !== 'substitute') throw new Error(`沒有人的 ID 3 應該由電腦代打：${p3.state}`);
 };
+
+// 黑幕上的版面：骨架（含揮到最低的手）畫在頂端工具列與樂譜面板之間，不被面板蓋住、也不鑽到工具列底下
+SCENARIOS.skeletonClearOfPanel = async ({ page, url, out }) => {
+  await installFakePose(page, [{ cx: 0.35, cy: 0.33, scale: 0.17, amp: 1.6, periodMs: 1000 }, { cx: 0.66, cy: 0.36, scale: 0.15, amp: 1.4, periodMs: 1300 }]);
+  await boot(page, url);
+  await setPoseCount(page, 2);
+  await loadLocal(page, out, 'quartet');
+  for (const [i, v] of [[0, '1'], [1, '2'], [2, 'kb'], [3, 'kb']]) await assignPart(page, i, v);
+  await closePanel(page);
+  await play(page);
+  await page.waitForTimeout(2500);
+  for (let n = 0; n < 6; n++) {
+    await page.waitForTimeout(170);
+    const r = await page.evaluate(() => {
+      const c = document.getElementById('overlay-canvas'), box = c.getBoundingClientRect();
+      const s = Math.max(box.width / c.width, box.height / c.height), offY = (box.height - c.height * s) / 2;
+      const row = (y) => Math.round((y - box.top - offY) / s);
+      const panelTop = row(document.getElementById('score-panel').getBoundingClientRect().top);
+      const toolBottom = row(document.getElementById('top-center-stack').getBoundingClientRect().bottom);
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      let below = 0, above = 0, total = 0;
+      for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+        if (!d[(y * c.width + x) * 4 + 3]) continue;
+        total++;
+        if (y >= panelTop) below++;
+        if (y < toolBottom - 2) above++;
+      }
+      return { below, above, total, panelTop, toolBottom };
+    });
+    if (r.total < 500) throw new Error(`骨架幾乎沒畫：${JSON.stringify(r)}`);
+    if (r.below > 0) throw new Error(`骨架畫到樂譜面板底下：${JSON.stringify(r)}`);
+    // ID 標籤可能貼著工具列下緣；只允許極少量的標籤描邊
+    if (r.above > 50) throw new Error(`骨架鑽到頂端工具列底下：${JSON.stringify(r)}`);
+  }
+};

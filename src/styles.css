@@ -341,7 +341,7 @@ body, html {
   position: absolute;
   left: 50%; top: 50%;
   transform: translate(-50%, -50%);
-  z-index: 2;
+  z-index: 4;   /* 在樂譜面板（3）之上：人多、條帶變高時「請面向鏡頭」也不會被蓋住 */
   max-width: 90%;
   font-size: calc(var(--ui-fs) * 1.2);
   font-weight: 700;
@@ -375,7 +375,7 @@ body, html {
 
 /* 永久黑幕：攝影機畫面刻意永遠不顯示（鏡頭與追蹤仍在背景運作，見 vision.js）。
    沒有任何切換方式。z-index 蓋過 #gl-canvas（沒設 z-index，隱含 0）但蓋不過 #overlay-canvas
-   （z-index:1）——只蓋攝影機畫面，骨架要畫在黑幕之上；同時仍在 #stage-hint（z-index 2）之下，
+   （z-index:1）——只蓋攝影機畫面，骨架要畫在黑幕之上；同時仍在 #stage-hint（z-index 4）之下，
    讓「請選擇現場人數」之類的提示文字還是看得到。 */
 #stage-blackout {
   position: absolute;
@@ -581,12 +581,12 @@ body, html {
 .score-part-mode { flex-shrink: 0; width: auto; min-width: 5.5em; }
 
 /* 樂譜面板（index.html 的 #score-panel）：舞台底部一整排，每位演奏者一條；左邊狀態（#performer-hud）、右邊樂譜（#score-canvas），兩邊的條高一樣（--lane-h）。
-   不吃點擊（不擋到任何東西）。條高：每條最多 4.4em，人多時整個面板不超過舞台高度的 42%（左右兩邊都把高度平均分給每一條）。 */
+   不吃點擊（不擋到任何東西）。條高：每條最多 4.4em，人多時整個面板不超過舞台高度的 36%（左右兩邊都把高度平均分給每一條；黑幕上骨架畫在面板上方，面板越高人就越小）。 */
 .score-panel {
   --lanes: 1;
   position: absolute; left: 1.5%; right: 1.5%; bottom: 1.2%; z-index: 3;
   display: flex; gap: 0.5em; pointer-events: none;
-  height: min(calc(4.4em * var(--lanes)), 42%);
+  height: min(calc(4.4em * var(--lanes)), 36%);
 }
 .score-panel[hidden] { display: none; }
 .performer-hud { display: flex; flex-direction: column; width: 15.5em; flex-shrink: 0; }
@@ -595,13 +595,17 @@ body, html {
   flex: 1 1 0; min-height: 0; box-sizing: border-box;
   display: flex; flex-direction: column; justify-content: center; gap: 0.05em;
   padding: 0.2em 0.6em; border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.72); border: 2px solid var(--hud-color, var(--border));
+  /* 舞台是黑幕：用他自己顏色的淡底色才分得出一格一格（color-mix 不支援的瀏覽器退回深灰） */
+  background: #161616; background: color-mix(in srgb, var(--hud-color, #888) 16%, #0c0c0c);
+  border: 2px solid var(--hud-color, var(--border));
   color: var(--text); font-size: 0.95em; line-height: 1.2; overflow: hidden;
 }
 .hud-chip .hud-line { display: flex; gap: 0.5em; align-items: baseline; white-space: nowrap; }
 .hud-chip .hud-who { font-weight: 800; color: var(--hud-color, var(--text)); }
 .hud-chip .hud-mode { font-size: 0.82em; opacity: 0.85; }
 .hud-chip .hud-state { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hud-chip[data-state="behind"] { background: #3a2508; }
+.hud-chip[data-state="substitute"] { background: #3a1212; }
 .hud-chip[data-state="behind"] .hud-state { color: #ffb347; }
 .hud-chip[data-state="substitute"] .hud-state { color: #ff8080; }
 .hud-chip[data-state="resting"] .hud-state, .hud-chip[data-state="waiting"] .hud-state { color: #9ad; }
