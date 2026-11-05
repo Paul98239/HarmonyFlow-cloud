@@ -203,6 +203,8 @@ export function ensembleStats() {
 export function audioLatency() {
   return synth.audioLatencyInfo();
 }
+// 量測（同上）：播放前預先載入音色送了幾個探測音、花了多久（synth.js 的 preloadVoices()）
+export const preloadStats = () => synth.preloadStats();
 
 // 量測（同上）：錄音 v4，給 main.js 的 __pressLog 匯出做離線分析：歌、指派（Map 展開成 [partId, 槽位][] 才能轉 JSON）、每次按鍵嘗試（鍵、事件發生與程式收到的時刻、排程器時鐘、
 // 有沒有放行與結果：放行／被擋／前奏・休止・超前預按／代打接手、有沒有跳到合奏位置）、每次放開（lifts：鍵、時鐘、收了幾顆音）、事件串流（錨點、速度、每顆音實際發聲與收音的時刻、

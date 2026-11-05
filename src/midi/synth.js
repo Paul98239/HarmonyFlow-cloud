@@ -303,7 +303,41 @@ export async function load(score, assignments) {
   ensurePorts(portsNeeded(score, assignments)); // 聲部多到 4 個 port 放不下的歌才會補；補完一定在送初始 patch 之前
   scheduler.load(score, assignments);
   isSongLoaded = true;
+  needsPreload = true;   // 第一次播放前預先載入這首歌用到的音色（見 preloadVoices()）
 }
+
+// 預先載入這首歌用到的音色（scheduler.js 的 preloadVoices()）：輸出先靜音，每個用到的音高送一下、全部收掉，
+// 等兩個合成器都處理完（getSnapshot 一來一回當作屏障：worklet 依序處理訊息），再把音量打開。解過的 sample 合成器會一直留著，
+// 同樣的樂器第二次幾乎不用等；最多等 PRELOAD_WAIT_MS。
+let needsPreload = false;
+const PRELOAD_WAIT_MS = 3000;
+async function preloadVoices() {
+  if (!needsPreload || !audioCtx || !masterGain) return;
+  needsPreload = false;
+  const g = masterGain.gain, level = (MASTER_GAIN * LEVEL_MATCH) / SOFT_CLIP_RANGE;
+  const t0 = performance.now();
+  g.cancelScheduledValues(audioCtx.currentTime);
+  g.setValueAtTime(0, audioCtx.currentTime);
+  let n = 0;
+  try {
+    n = scheduler.preloadVoices();
+    synth.stopAll(true);
+    synthHuman.stopAll(true);
+    let timer;
+    await Promise.race([
+      Promise.all([synth.getSnapshot?.(), synthHuman.getSnapshot?.()]),
+      new Promise((r) => { timer = setTimeout(r, PRELOAD_WAIT_MS); }),
+    ]).finally(() => clearTimeout(timer));
+  } catch (err) {
+    console.warn('預先載入音色失敗（照常播放）', err);
+  } finally {
+    // 收掉的音在下一個渲染區塊才真的停：再等 30ms 才打開
+    g.setValueAtTime(level, audioCtx.currentTime + 0.03);
+  }
+  lastPreload = { probes: n, ms: Math.round(performance.now() - t0) };
+}
+let lastPreload = null;
+export const preloadStats = () => lastPreload;
 
 // 播放中（含暫停）改指派：不重新載入、不從頭，從目前位置接續（排程器的 reassign()）。歌曲需要的 port 變多就先補，補完 reset 過的
 // channel 由 reassign() 重送初始狀態。沒載入歌曲時不做事。
@@ -311,6 +345,7 @@ export function reassign(score, assignments) {
   if (!isSongLoaded) return;
   ensurePorts(portsNeeded(score, assignments));
   scheduler.reassign(assignments);
+  if (!scheduler.isPlaying()) needsPreload = true;   // 暫停中改指派：新的譜表可能用到新的音色，續播前預先載入（播放中不能靜音，就不做）
 }
 
 // AudioContext 不在跑時恢復：'suspended'（還沒有使用者手勢、或被瀏覽器暫停）與 Safari 的 'interrupted'（來電、Siri、切到別的 app）都要 resume；
@@ -335,6 +370,7 @@ export async function play() {
   isProcessingPlay = true;
   try {
     const ok = await ensureRunning();
+    await preloadVoices();
     scheduler.play();
     return ok;
   } finally { isProcessingPlay = false; }
@@ -345,6 +381,7 @@ export async function restart() {
   isProcessingPlay = true;
   try {
     const ok = await ensureRunning();
+    await preloadVoices();
     scheduler.restart();
     return ok;
   } finally { isProcessingPlay = false; }

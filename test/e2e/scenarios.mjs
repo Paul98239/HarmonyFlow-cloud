@@ -528,6 +528,9 @@ SCENARIOS.noClipping = async ({ page, url, out }) => {
   if (p.frames < 20) throw new Error(`沒量到輸出：${JSON.stringify(p)}`);
   if (p.over > 0 || p.max > 1) throw new Error(`輸出削波（爆音）：${JSON.stringify(p)}`);
   if (p.max < 0.5) throw new Error(`輸出太小聲：${JSON.stringify(p)}`);
+  // 播放前預先載入了這首歌的音色（第一下不會因為合成器在解壓縮 sample 而爆音、變晚）；上面的音量檢查也確認了之後有把輸出打開
+  const pre = await page.evaluate(() => window.__stats().預先載入音色);
+  if (!(pre?.probes > 0)) throw new Error(`播放前沒有預先載入音色：${JSON.stringify(pre)}`);
   const comps = await page.evaluate(() => window.__compressors);
   if (comps) throw new Error(`輸出路徑上建了 ${comps} 個 DynamicsCompressor（每顆音晚 6ms）`);
 };

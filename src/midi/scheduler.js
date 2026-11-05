@@ -201,6 +201,8 @@ export function portsNeeded(score, assignments) {
 //    去抖窗口只看一拍、不跟著連按縮小，速度上限 BEAT_MODE_MAX_RATE：亂按也不會越推越快。
 // 應用層數字（不是規格）：
 const BEAT_MODE_MAX_RATE = 1.6;   // 拍子模式的速度上限（檔案速度的倍數）
+const PRELOAD_VELOCITIES = [36, 80, 120];   // 預先載入音色時每個音高送的力度（涵蓋音色庫常見的力度分層，見 preloadVoices()）
+const PRELOAD_MAX_PROBES = 4000;
 const MUSICIAN_MODE_MAX_RATE = 3; // 音樂家模式的速度上限：音樂家每一下都算、估速又跟手，亂按或提早很多按會估出好幾倍的速度；真的演奏不會快到檔案的三倍
 const BEAT_GROUP_MAX_SEC = 1.6;   // 拍子模式：太快的拍合併時，一組最多跨這麼久（真實秒）
 const BEAT_HOLD_AHEAD = 0.6;      // 拍子模式：離下一拍的頭還超過這麼多拍的一下算「打拍子」（見 _triggerBody）
@@ -776,6 +778,25 @@ export class Scheduler {
     const view = { version: (this._scoreViewCache?.view.version ?? 0) + 1, lanes, beatSec: Float64Array.from(this._plan.beatLines ?? [], sec) };
     this._scoreViewCache = { plan: this._plan, view };
     return view;
+  }
+
+  /**
+   * 預先載入音色（合成器在 worklet 裡第一次用到某個 sample 才解壓縮 SF3 的 Vorbis，一個平均 1.6ms、最多十幾 ms，
+   * 一個渲染區塊只有約 2.7ms：第一次出現的和弦、鼓組會爆一聲、那一下也會晚）。每個譜表、每個用到的音高、幾種力度各送一個 noteOn，
+   * 合成器就把要用的 sample 都解好、快取起來（官方 Sequencer 載入歌曲時做的 preloadSynth 是同一件事）。呼叫端負責先把輸出靜音、之後 stopAll。
+   * 回傳送了幾個。在載入之後、播放之前呼叫（音色是載入時送的初始音色）。
+   */
+  preloadVoices(velocities = PRELOAD_VELOCITIES, cap = PRELOAD_MAX_PROBES) {
+    let n = 0;
+    for (const staff of this._plan.staves.values()) {
+      const pitches = [...new Set(staff.notes.map((x) => x.midiNote))];
+      for (const pitch of pitches) for (const v of velocities) {
+        if (n >= cap) return n;
+        this._router.noteOn(staff, pitch, v);
+        n++;
+      }
+    }
+    return n;
   }
 
   /**

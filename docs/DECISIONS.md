@@ -344,3 +344,12 @@
 - 結果：延遲 −6ms（每一顆音）；大聲的歌峰值 0.999、沒有削波；五首測資的響度（RMS）跟原本差不到 0.4dB（quartet −16.56→−16.89、pianoChords −17.53→−17.64、quintet −12.41→−12.11、duet −18.66→−19.01 dB）。
 - 替代方案：在後面再加一顆 DynamicsCompressor 當限幅器——不採用，又多 6ms。用 AudioWorklet 寫有預看的限幅器——不採用，預看就是延遲；軟削波只碰極少數的峰值，聽感最好的零延遲做法。
 - 測試：`test/softclip.test.mjs`（曲線：膝點以下不變、不超過 1、單調、對稱）；端到端 `noClipping`（大聲的歌輸出不超過 1.0、輸出路徑上沒有 DynamicsCompressor）。
+
+### D8-6 播放前預先載入音色（第一下不爆音、不變晚）
+- 讀原始碼：SF3 音色庫的 sample 是壓縮的，合成器（worklet）第一次用到才解壓縮；官方 Sequencer 載入歌曲時會先 `preloadSynth()` 把要用的都解好（註解寫「resulting in a smooth playback」），
+  我們的排程器直接驅動合成器，原本沒有這一步。實測（同一個音色庫、瀏覽器）：解一個 sample 平均 1.6ms、p90 3ms、最多 16ms，一個渲染區塊只有約 2.7ms——
+  第一次出現的和弦、鼓組會在音訊執行緒上超時（爆一聲），那一下也晚。
+- 不用官方 Sequencer 來預載：它載入歌曲時會對合成器重設控制器、送 program change、補 channel，跟排程器的 channel 配置打架。
+- 做法：載入之後、第一次播放之前，輸出先靜音；每個譜表、每個用到的音高、三種力度（36／80／120）各送一個 noteOn（scheduler.js 的 preloadVoices()，最多 4000 個），
+  兩個合成器 stopAll，等 getSnapshot 一來一回（worklet 依序處理訊息，等於「前面的都做完了」的屏障，最多等 3 秒），再打開輸出。暫停中改指派之後續播也會再做一次。
+- 結果（第一下按下去到合成器處理完的時間）：大型測資 137ms → 22ms、quartet 25 → 12ms、pianoChords 34 → 17ms；代價是新歌第一次按 ▶ 多等 50～230ms（還沒有聲音的時候）。`__stats().預先載入音色` 看得到。

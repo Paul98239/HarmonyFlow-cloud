@@ -24,6 +24,7 @@ window.__stats = () => {
     合奏: midiPlayer.ensembleStats(),
     按鍵事件等待ms: summarizeMs(keyWaits),
     音訊輸出: audio,
+    預先載入音色: midiPlayer.preloadStats(),
     估計按下到出聲ms: audioFixedMs === null ? null : { 固定音訊段ms: audioFixedMs, ...summarizeMs(keyWaits.map((x) => x + audioFixedMs)) },
   };
 };
