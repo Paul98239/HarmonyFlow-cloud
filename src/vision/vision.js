@@ -392,6 +392,9 @@ const CUE_LEAD_SEC = 1.5;                   // 下一下前多久開始填徽章
 // 每位演奏者的提示（main.js 給：() => Map<ID, { state, dueInSec }>，沒有指派或沒在演奏就沒有）
 let performerCues = null;
 export function setPerformerCues(fn) { performerCues = typeof fn === "function" ? fn : null; }
+// 每位在鏡頭裡的演奏者（ID）畫在畫面上的水平位置（0～1，鏡像之後、跟骨架同一個座標）：背景樂器放在他身後（stageInstruments.js 讀）
+const performerX = new Map();
+export const getPerformerPositions = () => performerX;
 // 骨架畫在頂端工具列與樂譜面板之間：攝影機畫面是黑幕，骨架不必對齊影像，整個鏡頭範圍等比例縮到這一段（水平置中），面板出現、消失時平滑縮放（不跳）
 let drawScale = 1, drawTop = 0;
 const DRAW_SCALE_TAU_MS = 250;
@@ -433,6 +436,7 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
   const H = overlayCanvas.height;
 
   ctx2d.clearRect(0, 0, W, H);
+  performerX.clear();
   if (activeTracks.length === 0) return;
 
   // 縮放到面板上方：目標比例＝1 − 面板佔的比例，往目標平滑靠近
@@ -567,6 +571,7 @@ function renderSkeletonOverlay(activeTracks, nowMs) {
     const scPx = ds * Math.max(20, track.scale * W);                       // 畫出來的肩寬（像素）
     const R = Math.max(BADGE_MIN_R, Math.min(BADGE_MAX_R, scPx * 0.26));   // 徽章半徑：下限讓長輩在兩三公尺外也看得清楚號碼
     const hx = W / 2 + ds * ((1 - anchor.x) * W - W / 2), hy = oy + ds * anchor.y * H;
+    performerX.set(track.id, hx / W);
     const cx = hx, cy = Math.max(bandTop + R + 4, hy - scPx * HEAD_RADIUS - R * 1.25);
 
     const cue = cues?.get(track.id);

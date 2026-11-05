@@ -95,14 +95,16 @@ function draw(ctx, { w: W, h: H, dpr }, view, stat, nowMs) {
     const rgb = hexRgb(slotColor(v.slot));
     const y0 = Math.round(i * laneH) + 2 * dpr, lh = Math.round(laneH) - 4 * dpr;
     if (lh < 8 * dpr) continue;   // 版面還沒量好（剛顯示、還沒 resize）時條高可能是 0 或負的
-    // 底色：代打中泛紅、落後泛橘、休息／等待泛藍
-    // 底色：舞台是黑幕，半透明黑等於沒畫，所以用他自己顏色的淡底色；代打中泛紅、落後泛橘、休息／等待泛藍（都比正常亮，一眼看得出來）
-    // 休息／等待用中性灰（藍色在長輩眼裡容易顯得褪色、看不出來）
-    ctx.fillStyle = v.state === 'substitute' ? 'rgba(200,50,50,0.32)' : v.state === 'behind' ? 'rgba(230,140,20,0.3)' : v.state === 'resting' || v.state === 'waiting' ? 'rgba(140,140,150,0.18)' : rgba(rgb, 0.1);
-    ctx.fillRect(0, y0, W, lh);
+    // 底色：舞台是深色，半透明黑等於沒畫，所以用他自己顏色的淡底色；代打中泛紅、落後泛橘（都比正常亮，一眼看得出來）、
+    // 休息／等待用暖灰（藍色在長輩眼裡容易顯得褪色、看不出來）。圓角跟左邊的狀態格一樣
+    ctx.fillStyle = v.state === 'substitute' ? 'rgba(200,60,50,0.32)' : v.state === 'behind' ? 'rgba(230,140,30,0.3)' : v.state === 'resting' || v.state === 'waiting' ? 'rgba(170,150,135,0.18)' : rgba(rgb, 0.1);
+    const rr = Math.min(lh / 3, 12 * dpr);
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(0.5, y0 + 0.5, W - 1, lh - 1, rr); else ctx.rect(0.5, y0 + 0.5, W - 1, lh - 1);
+    ctx.fill();
     ctx.strokeStyle = rgba(rgb, v.isLeader ? 1 : 0.7);
     ctx.lineWidth = (v.isLeader ? 3 : 1.5) * dpr;
-    ctx.strokeRect(0.5, y0 + 0.5, W - 1, lh - 1);
+    ctx.stroke();
     // 拍線只畫給拍子模式的人（他照拍子揮）；其他模式看音就好，多一排線只是雜訊
     const beats = stat.beatSec;
     if (v.mode === 'beat') {
@@ -140,8 +142,8 @@ function draw(ctx, { w: W, h: H, dpr }, view, stat, nowMs) {
       // 從圓點到「現在」線的引導線：還要多久
       if (x > nowX + r) { ctx.fillStyle = rgba(rgb, 0.55); ctx.fillRect(nowX, cy - dpr, x - r - nowX, 2 * dpr); }
     }
-    // 「現在」線
-    ctx.fillStyle = '#fff';
+    // 「現在」線（奶油白）
+    ctx.fillStyle = '#fff3e0';
     ctx.fillRect(nowX - 1.5 * dpr, y0, 3 * dpr, lh);
   }
 }

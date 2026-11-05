@@ -75,7 +75,7 @@ export function fuzzCase(seed) {
   for (const s of slots) {
     const b = pick(r, BEHAVIORS);
     behaviors[s] = b;
-    const bot = botFor(r, s, b, seed + String(s).length);
+    const bot = botFor(r, s, b, seed * 8 + slots.indexOf(s));   // 每個人自己的亂數：同樣行為的兩個人不會在同一刻漏按、同樣抖動
     if (bot && sim.sched.inspect().groups.some((g) => g.slot === s)) sim.addBot(bot);
   }
   // 在場名單：從沒來的人不在鏡頭裡；揮手的人停手（亂按完、離開）的那一刻也走出鏡頭（真人停下來多半就是走開了），離開又回來的人回來時回到鏡頭
@@ -101,5 +101,8 @@ export function fuzzCase(seed) {
   // 而且停手的人不會讓合奏停著等：揮手的人停手就離開鏡頭（由電腦代打）；鍵盤手停手、人還在，合奏照規則等他
   const blocks = (s) => s === 'kb' && !keepsPlaying(behaviors[s]) && behaviors[s] !== 'never';
   const expectFinish = [...assigned].some((s) => keepsPlaying(behaviors[s])) && ![...assigned].some(blocks);
-  return { sim, score, expectFinish, desc: { seed, ppq: spec.ppq, smpte: !!spec.smpte, tempos: spec.tempos.map((t) => t.bpm), sigs: spec.timeSigs.map((t) => `${t.num}/${t.den}`), parts: spec.parts.length, perPart, modes, behaviors, durationSec: Math.round(score.durationSeconds) } };
+  // 播完的上限：曲長的 3 倍＋60 秒（很慢的人、長空白），而且一個起音至少給 1 秒（很密的聲部一拍按一下、一下只放一個音，本來就會比曲長久很多）
+  const onsets = Math.max(0, ...sim.sched.inspect().groups.filter((g) => g.slot !== null).map((g) => g.segments.length));
+  const limitMs = (score.durationSeconds * 3 + 60 + onsets) * 1000;
+  return { sim, score, expectFinish, limitMs, desc: { seed, ppq: spec.ppq, smpte: !!spec.smpte, tempos: spec.tempos.map((t) => t.bpm), sigs: spec.timeSigs.map((t) => `${t.num}/${t.den}`), parts: spec.parts.length, perPart, modes, behaviors, durationSec: Math.round(score.durationSeconds) } };
 }

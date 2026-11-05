@@ -142,6 +142,8 @@ export function setPerformerMode(slot, setting) {
 export const performerView = () => synth.scheduler.viewState();
 export const scoreOf = () => (synth.isLoaded() ? playerStore.state.score : null);
 export const scoreStatic = () => (synth.isLoaded() ? synth.scheduler.scoreView() : null);
+// 背景樂器：每位演奏者一件（scheduler.js 的 instrumentView()）
+export const instrumentStatic = () => (synth.isLoaded() ? synth.scheduler.instrumentView() : null);
 // 訂閱排程器的演奏事件（mode、release…，見 scheduler.js 的 PerformanceEvents），回傳取消訂閱的函式
 export const onPerformanceEvent = (type, fn) => synth.scheduler.events.on(type, fn);
 // 畫面上的演奏資訊（狀態列、樂譜）該不該顯示：演奏模式、播過了而且還沒換歌
@@ -309,13 +311,13 @@ async function playCurrentSource({ fromStart = false } = {}) {
   isSongLoading = true;
   playerStore.set({ busy: true });
 
-  let loadingIndicatorTimer = null;
+  let loadingIndicatorTimer = null, audioOk;
   try {
     const signature = buildPlaybackSignature(s.source);
     if (signature !== lastPlayedSignature || fromStart || s.finished) playbackRestartListener?.();
     if (signature === lastPlayedSignature) {
       // 引擎裡就是這份組合：重播鍵、或播完後按 ▶ 從頭來（scheduler.js 的 restart()），其餘只是續播
-      await (fromStart || s.finished ? synth.restart() : synth.play());
+      audioOk = await (fromStart || s.finished ? synth.restart() : synth.play());
     } else {
       // 簽章不同（換歌或改過指派）：完整重新載入，本來就從頭播。「處理中」只由 ▶ 的 ⋯ 表達、不改寫歌名；本地檔幾乎瞬間就好，所以延遲 120ms 才顯示 ⋯
       loadingIndicatorTimer = setTimeout(() => playerStore.set({ transport: 'loading' }), LOADING_INDICATOR_DELAY_MS);
@@ -325,8 +327,14 @@ async function playCurrentSource({ fromStart = false } = {}) {
         console.warn('⚠️ 分譜的 staff 超過合成器可用的輸出 channel（每個 port 旋律 15 個、鼓組各佔一個，載入時已依歌曲需要補 port），以下 staff 這一輪不會出聲：',
           synth.scheduler.unplacedStaffIds.join('、'));
       }
-      await synth.play();
+      audioOk = await synth.play();
       lastPlayedSignature = signature;
+    }
+    // 聲音沒有啟動（系統還沒把音訊交回來）：先不播，請他再按一次 ▶（那一下是使用者手勢，瀏覽器通常就會放行）
+    if (audioOk === false) {
+      synth.pause();
+      playerStore.set({ transport: 'paused', notice: '🔈 聲音還沒準備好，請再按一次 ▶', started: true });
+      return;
     }
     playerStore.set({ transport: 'playing', notice: null, started: true, finished: false });
     updateHumanGate();
@@ -506,7 +514,8 @@ const tickLog = [];
 let lastTickAt = null;
 export const tickIntervals = () => tickLog.slice();
 function schedulerTick() {
-  if (!synth.isLoaded() || synth.isPaused()) { lastTickAt = null; return; }
+  // 播放器說暫停就不推（防呆暫停時 pause() 自己也可能出錯，排程器還以為在播）
+  if (!synth.isLoaded() || synth.isPaused() || (playerStore.state.transport !== 'playing' && !isSongLoading)) { lastTickAt = null; return; }
   const now = performance.now();
   if (lastTickAt !== null) {
     tickLog.push([now, now - lastTickAt]);
@@ -596,6 +605,7 @@ const btnPreview = document.getElementById('btnPreview');
 const statusText = document.getElementById('midiStatusText');
 // 頂端進度條獨立於 pill 之外（見 index.html），不影響 fitSongTitle() 量的寬度
 const topProgressBar = document.getElementById('topProgressBar');
+const songTimeEl = document.getElementById('songTime');
 
 const IDLE_TITLE = '等待選擇歌曲...';
 
@@ -606,7 +616,8 @@ function fitSongTitle() {
   statusText.classList.remove('allow-wrap');
   statusText.style.setProperty('--song-title-scale', '1');
   const gapPx = parseFloat(getComputedStyle(pill).columnGap) || 0;
-  const available = pill.clientWidth - transportGroup.offsetWidth - gapPx;
+  const timeW = songTimeEl && !songTimeEl.hidden ? songTimeEl.offsetWidth + gapPx : 0;   // 播放時間也在同一排
+  const available = pill.clientWidth - transportGroup.offsetWidth - gapPx - timeW;
   const natural = statusText.scrollWidth;
   if (available <= 0 || natural <= available) return;
   const scale = Math.max(MIN_SONG_TITLE_SCALE, available / natural);
@@ -682,6 +693,11 @@ function renderTopProgress({ player }) {
     const ratio = Math.min(1, player.positionSeconds / total);
     if (topProgressBar.value !== ratio) topProgressBar.value = ratio;
   }
+  // 播放時間：有歌（全長 > 0）才顯示；文字只在秒數變了才寫（每 200ms 的 UI tick 不會一直改 DOM）
+  const timeText = total > 0 ? `${formatTime(Math.min(player.positionSeconds, total))} / ${formatTime(total)}` : '';
+  const showTime = timeText !== '';
+  if (songTimeEl.hidden === showTime) { songTimeEl.hidden = !showTime; fitSongTitle(); }
+  if (songTimeEl.textContent !== timeText) songTimeEl.textContent = timeText;
 }
 
 // 雲端曲庫（分類下拉／關鍵字搜尋／歌曲下拉）：資料來自 midiApi.js；搜尋狀態放 playerStore.library，兩個下拉的 option 只在 items／categories 參照變了才重建。分類集合跨搜尋累積（曲庫的分類端點可能失敗，搜尋結果裡的分類也要收）。

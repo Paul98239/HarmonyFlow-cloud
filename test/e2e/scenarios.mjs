@@ -390,3 +390,52 @@ SCENARIOS.interruptions = async ({ page, url, out, errors }) => {
   const released = (await pressLog(page)).filter((p) => p.released).length;
   if (released < 3) throw new Error(`繼續之後按鍵沒放行（放行 ${released} 下）`);
 };
+
+// 背景的樂器：五人各一件（五種畫法），照他實際發出的音動作——鍵盤手按住鍵時，他的樂器亮著的音高＝排程器正在響的他的音；放開後熄掉
+SCENARIOS.stageInstruments = async ({ page, url, out }) => {
+  await installFakePose(page, [0.2, 0.4, 0.6, 0.8].map((cx, i) => ({ cx, cy: 0.36, scale: 0.11, amp: 1.2, periodMs: 1100 + 120 * i, phaseMs: i * 180 })));
+  await boot(page, url);
+  await setPoseCount(page, 4);
+  await loadLocal(page, out, 'quintet');
+  await page.waitForTimeout(800);
+  for (const [i, v] of [[0, 'kb'], [1, '1'], [2, '2'], [3, '3'], [4, '4']]) await assignPart(page, i, v);
+  await closePanel(page);
+  await play(page);
+  await page.focus('body');
+  const kbSounding = () => page.evaluate(async () => {
+    const synth = await import('/src/midi/synth.js');
+    const ids = new Set(synth.scheduler.inspect().staves.filter((s) => s.slot === 'kb' && s.kind === 'human').map((s) => s.id));
+    const sched = synth.scheduler.inspect().staves.filter((s) => ids.has(s.id)).flatMap((s) => s.sounding.map((e) => e.pitch)).sort((a, b) => a - b);
+    const inst = window.__instruments().find((i) => i.slot === 'kb');
+    return { sched, inst: inst?.sounding ?? null, all: window.__instruments().map((i) => `${i.slot}:${i.kind}`) };
+  });
+  let matched = 0;
+  for (let i = 0; i < 6; i++) {
+    const key = i % 2 ? 'KeyJ' : 'KeyF';
+    await page.keyboard.down(key);
+    await page.waitForTimeout(160);
+    const r = await kbSounding();
+    if (r.all.length !== 5) throw new Error(`應該有五件樂器：${JSON.stringify(r.all)}`);
+    if (r.sched.length && JSON.stringify(r.sched) === JSON.stringify(r.inst)) matched++;
+    else if (r.sched.length) throw new Error(`按住時樂器亮的音高跟正在響的音不一樣：${JSON.stringify(r)}`);
+    await page.keyboard.up(key);
+    await page.waitForTimeout(260);
+  }
+  if (matched < 3) throw new Error(`按了 6 下只有 ${matched} 下對得上`);
+  await page.waitForTimeout(1500);
+  const st = await page.evaluate(() => window.__instrumentStats());
+  if (!(st.幀數 > 10)) throw new Error(`背景樂器幾乎沒畫：${JSON.stringify(st)}`);
+  if (!(st.平均ms < 4)) throw new Error(`背景樂器每幀太花時間：${JSON.stringify(st)}`);
+  // 樂器畫在舞台上（不透明的像素夠多），而且在樂譜面板上方
+  const px = await page.evaluate(() => {
+    const c = document.getElementById('instrument-canvas'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const panelTop = (document.getElementById('score-panel').getBoundingClientRect().top - c.getBoundingClientRect().top) * (c.height / c.getBoundingClientRect().height);
+    let n = 0, below = 0;
+    for (let y = 0; y < c.height; y += 3) for (let x = 0; x < c.width; x += 3) if (d[(y * c.width + x) * 4 + 3] > 20) { n++; if (y > panelTop + 2) below++; }
+    return { n, below };
+  });
+  if (px.n < 400) throw new Error(`背景樂器幾乎看不到：${JSON.stringify(px)}`);
+  if (px.below > 0) throw new Error(`背景樂器畫到樂譜面板底下：${JSON.stringify(px)}`);
+  await page.mouse.move(640, 300);
+  await page.screenshot({ path: `${out}stageInstruments.png` });
+};

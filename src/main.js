@@ -2,12 +2,13 @@
 
 import * as midiPlayer from './midi/midiPlayer.js';
 import { initUi, setLoadingStatus, dismissLoading, showError } from './ui.js';
-import { startVision, setPoseCountListener, setPerformanceStateListener, warmPoseModel, visionLog, visionFrameStats, getCameraInfo, setFrameLogRecording, clearFrameLog, skeletonStats, setAttentionHint, setPerformerCues } from './vision/vision.js';
+import { startVision, setPoseCountListener, setPerformanceStateListener, warmPoseModel, visionLog, visionFrameStats, getCameraInfo, setFrameLogRecording, clearFrameLog, skeletonStats, setAttentionHint, setPerformerCues, getPerformerPositions } from './vision/vision.js';
 import { startKeyboardTrigger, getInputDelays } from './input/keyboard.js';
 import { createGestureTrigger } from './input/gestureTrigger.js';
 import { summarizeMs } from './midi/tempo.js';
 import { startPerformerHud } from './score/performerHud.js';
 import { startScoreView, stats as scoreViewStats } from './score/scoreView.js';
+import { startStageInstruments, stats as instrumentStats, instrumentDebug } from './score/stageInstruments.js';
 
 // __stats() 只量 JS 層，音訊段由「音訊輸出」補上，「估計按下到出聲ms」把整條路串起來。
 window.__stats = () => {
@@ -34,6 +35,9 @@ window.__faults = midiPlayer.faults;
 window.__view = midiPlayer.performerView;
 // __scoreViewStats()：樂譜面板每幀畫圖的耗時（主執行緒負擔）
 window.__skeletonStats = () => ({ 幀數: skeletonStats.frames, 平均ms: skeletonStats.frames ? +(skeletonStats.totalMs / skeletonStats.frames).toFixed(3) : 0, 最長ms: +skeletonStats.maxMs.toFixed(3) });
+// __instruments()：背景樂器這一刻在響的音高（跟排程器正在響的音對照）
+window.__instruments = instrumentDebug;
+window.__instrumentStats = () => ({ 幀數: instrumentStats.frames, 平均ms: instrumentStats.frames ? +(instrumentStats.totalMs / instrumentStats.frames).toFixed(3) : 0, 最長ms: +instrumentStats.maxMs.toFixed(3) });
 window.__scoreViewStats = () => ({ 幀數: scoreViewStats.frames, 平均ms: scoreViewStats.frames ? +(scoreViewStats.totalMs / scoreViewStats.frames).toFixed(3) : 0, 最長ms: +scoreViewStats.maxMs.toFixed(3) });
 
 // copy(__visionLog())：這一段演奏（從頭播起，暫停與曲終不記）的逐幀紀錄（兩手手腕、脖子以下節點的原始／world／平滑座標與 presence、偵測、鎖定的手、推論耗時）與追蹤層的鎖定／釋放事件，
@@ -128,6 +132,8 @@ async function bootSystem() {
 
   startPerformerHud({ getView: midiPlayer.performerView, isActive: midiPlayer.isPerforming, subscribeMode: (fn) => midiPlayer.onPerformanceEvent('mode', fn) });
   startScoreView({ getView: midiPlayer.performerView, getStatic: midiPlayer.scoreStatic, isActive: midiPlayer.isPerforming });
+  // 背景的樂器：照每位演奏者實際發出的音（排程器的 noteOn／noteOff 事件）動作
+  startStageInstruments({ getStatic: midiPlayer.instrumentStatic, getView: midiPlayer.performerView, isActive: midiPlayer.isPerforming, subscribe: midiPlayer.onPerformanceEvent, getPositions: getPerformerPositions });
   // 骨架頭上的 ID 徽章外圈：每位揮手的演奏者的狀態與「離下一下還有幾秒」（vision.js 每幀讀）
   setPerformerCues(() => {
     if (!midiPlayer.isPerforming()) return null;

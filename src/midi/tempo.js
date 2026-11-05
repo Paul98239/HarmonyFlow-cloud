@@ -108,6 +108,7 @@ export class TempoFollower {
     this.playbackRate = 1;     // 你現在的速度（樂譜秒 ÷ 真實秒）
     this._rateBounds = { lo: MIN_PLAYBACK_RATE, hi: MAX_PLAYBACK_RATE }; // 這首歌的速度區間（rateBoundsFor，計畫依你的聲部起音間隔算）
     this._history = [];        // 有效按鍵 [{ scoreSec, ms }]，估速用
+    this._interrupted = false; // 上一個被接受的那一下之後有按鍵被鎖吃掉（interrupt()）
     this._lastAcceptClock = null;     // 上一次有效按鍵的時鐘（去抖用）
     this._lastAttemptClock = null;    // 上一次按鍵嘗試（含被忽略的）的時鐘
     this._lastAttemptIntervalMs = Infinity; // 前兩次按鍵嘗試之間的間隔（去抖窗口用）
@@ -149,6 +150,9 @@ export class TempoFollower {
       const win = this.debounce === 'min' ? DEBOUNCE_MIN_MS
         : this.debounce === 'fixed' ? Math.max(debounceWindowMs(expectedMs), floorMs) : debounceWindowMs(expectedMs, this._lastAttemptIntervalMs);
       blocked = clock - this._lastAcceptClock < win;
+      // 擋下的這一下離上一個被接受的超過去抖窗口的上限：不是那一下的彈跳，是他一直在按、被更大的規則擋著（拍子模式的速度上限、同一條拍線）——
+      // 下一個被接受的間隔不是他的速度（同 interrupt()）。起音、音樂家模式的窗口不超過上限，不受影響
+      if (blocked) this.ignored(clock);
     }
     if (this._lastAttemptClock != null) this._lastAttemptIntervalMs = clock - this._lastAttemptClock;
     this._lastAttemptClock = clock;
@@ -164,6 +168,7 @@ export class TempoFollower {
   _updateRate(j, scoreSec, prevScoreSec, clock) {
     const B = this._rateBounds, press = { scoreSec, ms: clock };
     if (j === 0 || this._lastAcceptClock == null) { this._history = [press]; return; }   // 第一下（或改指派後的第一下）：沒有間隔可估
+    if (this._interrupted) { this._interrupted = false; this._history = [press]; this._surprise = null; return; }   // 中間被鎖吃掉過（見 interrupt()）
     const dS = scoreSec - prevScoreSec, dT = Math.max(1e-3, (clock - this._lastAcceptClock) / 1000);
     const x = dS / dT;                                           // 這一下隱含的速度
     if (x < B.lo) { this._history = [press]; this._surprise = null; return; }   // 空檔超過區間：停手，這次間隔不拿來估速（速度維持原本的值）
@@ -184,9 +189,16 @@ export class TempoFollower {
     this.playbackRate = estimatePlaybackRate(this._history, this.playbackRate, B, this.window);
   }
 
+  // 他按了、但這一下被鎖吃掉（超前鎖、這一拍已經開始）：從上一個被接受的那一下到下一個被接受的那一下之間他其實一直在按，
+  // 那段間隔量的是「被鎖住多久」不是他的速度——下一下只當新的起點（速度維持原本的值），不拿這段間隔估速
+  interrupt() { this._interrupted = true; }
+  // 這一下被別的規則擋掉（不是去抖）：離上一個被接受的超過去抖窗口的上限才算被鎖吃掉（太近的是同一下的重複）
+  ignored(clock) { if (this._lastAcceptClock != null && clock - this._lastAcceptClock > DEBOUNCE_MAX_MS) this._interrupted = true; }
+
   // 播放中改指派：去抖與估速歷史清掉（舊的間隔對不上新的 driver 序列），速度估計保留。
   forgetHistory() {
     this._history = [];
+    this._interrupted = false;
     this._lastAcceptClock = null;
     this._lastAttemptClock = null;
     this._lastAttemptIntervalMs = Infinity;

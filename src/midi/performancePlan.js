@@ -156,7 +156,7 @@ export function sliceOfTick(driverTicks, tick) {
 export const slotOrder = (slot) => (typeof slot === 'number' ? slot : 0);
 
 // 沒有任何演奏者（整首自動播放）時排程器用的空計畫：只有第 0 段，伴奏從開頭照原速放完（同一條程式路徑）
-export const emptyPerformerPlan = () => ({ slot: null, staffIds: new Set(), driverSegs: [], driverTicks: [], rateBounds: rateBoundsFor([]), controls: [], controlTicks: [], hasPrelude: false, rests: [], unitOf: [], unitLine: [] });
+export const emptyPerformerPlan = () => ({ slot: null, staffIds: new Set(), driverSegs: [], driverTicks: [], rateBounds: rateBoundsFor([]), controls: [], controlTicks: [], hasPrelude: false, rests: [], restEnds: [], unitOf: [], unitLine: [] });
 
 // 一個人的休止：他所有音的 [起音, 結尾) 合起來之後的空檔（notes 依起音排序）。空檔不超過 hold 的容差（匯出器縮短的相連音：MuseScore 少 1 tick、
 // 部分匯出器統一縮短約 5.4%）不算；第一個音之前與最後一個音之後不算（前奏另有前奏鎖，最後一個音之後他已經彈完）。MIDI 沒有休止的編碼，只能這樣推算。
@@ -174,7 +174,7 @@ export function computeRests(notes, holdCapTicks) {
 //  · driverSegs：沿用 parser 的 segment 但只留他的譜表的音；整個 segment 沒有他的音就不收（一次按鍵不該只推進一個不會響的 segment）。
 //  · controls／controlTicks：送他的譜表的控制器（依檔案順序）；落在他某個起音 tick 上的控制器屬於那個起音啟動的段，跟同 tick 的音一起在按下的那次呼叫裡送。
 //  · hasPrelude：他的第一個起音之前有別的音（伴奏或別人的聲部）＝前奏鎖要生效（純 tick 比較）；rateBounds：依他自己的起音間隔的速度區間。
-//  · rests：他的休止區間 [起, 迄)（computeRests）；firstTick／lastTick：他的第一個與最後一個起音。
+//  · rests：他的休止區間 [起, 迄)（computeRests）；restEnds：每段的迄（遞增，二分搜尋用）；firstTick／lastTick：他的第一個與最後一個起音。
 //  · unitOf／unitLine：拍子模式的單位（beats.js）：unitOf[j]＝第 j 個起音屬於第幾拍（同一個值的起音一下放），unitLine[j]＝那一拍的拍線 tick。
 function buildPerformer(score, staves, slot, controls, earliestTick, holdCapTicks) {
   const staffIds = new Set([...staves.values()].filter((s) => s.kind === 'human' && s.slot === slot).map((s) => s.id));
@@ -200,7 +200,7 @@ function buildPerformer(score, staves, slot, controls, earliestTick, holdCapTick
   const rests = computeRests(driverSegs.flatMap((seg) => seg.items.map((it) => it.note)), holdCapTicks);
   return {
     slot, staffIds, driverSegs, driverTicks, rateBounds, controls: mine, controlTicks: mine.map((c) => c.ev.ticks), hasPrelude,
-    rests, firstTick: driverTicks[0], lastTick: driverTicks.at(-1), unitOf, unitLine: unitLineTicks(score, unitOf),
+    rests, restEnds: rests.map((r) => r[1]), firstTick: driverTicks[0], lastTick: driverTicks.at(-1), unitOf, unitLine: unitLineTicks(score, unitOf),
   };
 }
 

@@ -10,13 +10,13 @@ for (let seed = from; seed < from + count; seed++) {
   try {
     const c = fuzzCase(seed);
     desc = c.desc;
-    // 播完的上限：曲長的 3 倍＋60 秒（很慢的人、長空白）
-    c.sim.runToEnd((c.score.durationSeconds * 3 + 60) * 1000);
+    // 播完的上限見 fuzzCase 的 limitMs
+    c.sim.runToEnd(c.limitMs);
     v = violations(c.sim, { finished: c.expectFinish });
     // 沒奏完時（停著等人）hold 著的音本來就還在響：不算卡音
     if (!c.sim.sched.isFinished()) v = v.filter((x) => !x.startsWith('卡音'));
   } catch (err) {
-    v = [`例外：${err.stack.split('\n').slice(0, 4).join(' ← ')}`];
+    v = [`例外：${String(err?.stack ?? err).split('\n').slice(0, 4).join(' ← ')}`];
   }
   if (v.length) { bad++; console.log(`種子 ${seed}：${v.join('；')}\n  ${JSON.stringify(desc)}`); }
 }

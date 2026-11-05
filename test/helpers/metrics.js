@@ -1,6 +1,7 @@
 // metrics.js — 從模擬結果量「絕對不能發生」的事：觸發不是當下發聲、伴奏擠成一團、累積落後、帶頭的人來回跳、代打交還多推一格。
-
 import { Sim } from './sim.js';
+import { upperBound } from '../../src/midi/search.js';
+import { LOOKAHEAD_MS } from '../../src/midi/scheduler.js';
 
 /** 放行的觸發裡，你的音不是在這次呼叫內、不帶時間戳送出的（＝不是 0ms）；回傳違規清單 */
 export function delayedTriggers(sim) {
@@ -15,11 +16,11 @@ export function bunching(sim, { minRatio = 0.2, minScoreGapSec = 0.05 } = {}) {
   const chased = new Set(sim.ofType('chase').flatMap((e) => e.chased.map((n) => n.id)));
   const ons = sim.ofType('noteOn').filter((e) => e.kind === 'assist' && !chased.has(e.noteId));
   // 每個起音 tick 取最早發聲的時刻
-  const byTick = new Map();
+  const byTick = new Map(), sentAt = new Map();   // sentAt：那顆音送出的時刻（lookahead 會提早送，照當時的錨點排）
   const timeOf = (e) => (e.timed ? Math.max(e.dueMs, e.clockMs) : e.clockMs);
   for (const e of ons) {
     const t = e.note.startTick, ms = timeOf(e);
-    if (!byTick.has(t) || ms < byTick.get(t)) byTick.set(t, ms);
+    if (!byTick.has(t) || ms < byTick.get(t)) { byTick.set(t, ms); sentAt.set(t, e.clockMs); }
   }
   const ticks = [...byTick.keys()].sort((a, b) => a - b);
   // 換帶頭的人時合奏跳到新帶頭者的位置（垂直切片：中間的音追音或跳過）是規則本身，跳點前後兩個音靠得近不算擠成一團
@@ -29,12 +30,18 @@ export function bunching(sim, { minRatio = 0.2, minScoreGapSec = 0.05 } = {}) {
   // 帶頭的人提早按時，已經帶時間戳送出（最多 LOOKAHEAD_MS 之前）的那一顆取消不了，會緊跟在新一拍的音後面響（見 docs/DECISIONS.md），不算
   // 跟「合奏當時跟著的速度」比（最近一次錨點的速度）：帶頭的人彈得快，伴奏本來就該跟著快；擠成一團是比他的速度還擠（追趕、堆在一起）
   const anchors = sim.events.filter((e) => (e.type === 'anchor' || e.type === 'reanchor') && e.ensemble && Number.isFinite(e.rate)).map((e) => [e.clockMs, e.rate]);
-  const rateAt = (ms) => { let r = 1; for (const [t, rate] of anchors) { if (t > ms + 1) break; r = rate; } return r; };
+  const anchorAt = anchors.map(([t]) => t);
+  const rateAt = (ms) => { const i = upperBound(anchorAt, ms + 1) - 1; return i >= 0 ? anchors[i][1] : 1; };
+  // 兩個音之間合奏重新對時過（帶頭的人按了下一下）：這段間隔是跟著他按的，不是電腦自己擠（音樂家模式他按多快合奏就多快，速度估計有上限、按下去的位置沒有）
+  const pressAt = sim.events.filter((e) => e.type === 'anchor' && e.ensemble).map((e) => e.clockMs);
+  const pressedBetween = (a, b) => { const i = upperBound(pressAt, a + 1); return i < pressAt.length && pressAt[i] <= b - 1; };
   const squeezed = (i) => {
     const ds = sim.score.midiTicksToSeconds(ticks[i]) - sim.score.midiTicksToSeconds(ticks[i - 1]);
     if (ds < minScoreGapSec) return null;
+    if (pressedBetween(byTick.get(ticks[i - 1]), byTick.get(ticks[i]))) return null;
     const dr = (byTick.get(ticks[i]) - byTick.get(ticks[i - 1])) / 1000;
-    const rate = Math.max(rateAt(byTick.get(ticks[i - 1])), rateAt(byTick.get(ticks[i])));
+    // 送出時與響的時候的錨點速度都算（已經照舊的、比較快的速度送出去的音，換成新的速度之後不能拿新的速度來量它）
+    const rate = Math.max(...[ticks[i - 1], ticks[i]].flatMap((t) => [rateAt(byTick.get(t)), rateAt(sentAt.get(t))]));
     return (dr * rate) / ds < minRatio ? { tick: ticks[i], scoreGap: ds, realGap: dr, rate } : null;
   };
   const bad = [];
@@ -62,8 +69,13 @@ export function leaderAlignment(sim, { tolMs = 15 } = {}) {
     if (!assistByTick.has(t) || ms < assistByTick.get(t)) assistByTick.set(t, ms);
   }
   let worst = 0, bad = 0;
+  // 這一下讓他接手帶頭（他按的時候還不是帶頭的人）：那一刻的伴奏是照前一位帶頭者的時間軸、已經帶時間戳送出（最多 LOOKAHEAD_MS 之前）的，取消不了，不算累積落後
+  //（拍子模式的預按在換人之後的下一個 tick 才放出，所以看換人之後 LOOKAHEAD_MS 以內）
+  const handovers = sim.ofType('leader').map((e) => [e.simMs, e.to]);
+  const justHandedOver = (r) => handovers.some(([t, to]) => to === r.slot && r.simMs >= t && r.simMs - t <= LOOKAHEAD_MS);
   for (const r of sim.ofType('release')) {
     if (leaderOf(r.simMs) !== r.slot) continue;
+    if (justHandedOver(r)) continue;
     const ms = assistByTick.get(r.ticks);
     if (ms === undefined) continue;
     // 伴奏比帶頭的人晚＝伴奏落後（累積落後）；伴奏比他早是他落在合奏後面（換人帶頭時合奏不倒退、停在原處等他），不算伴奏的錯

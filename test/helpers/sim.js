@@ -163,7 +163,13 @@ export function scoreBot(slot, opts = {}) {
       return planned.at;
     },
     fire(sim) {
-      if (extraAt !== null) { extraAt = null; sim.press(slot, { source, key: source === 'keyboard' ? 'KeyL' : undefined }); return; }
+      if (extraAt !== null) {
+        // 多按的一下（手滑）：鍵盤一樣會放開——先放掉按著的鍵，這一下的鍵之後由下一下或 idle 放開
+        extraAt = null;
+        if (source === 'keyboard') { if (lastKey) sim.lift(slot, lastKey); lastKey = 'KeyL'; }
+        sim.press(slot, { source, key: source === 'keyboard' ? 'KeyL' : undefined });
+        return;
+      }
       const idx = planned.index;
       planned = null;
       lastFired = { index: idx, at: sim.now };
@@ -230,8 +236,8 @@ export function beatBot(slot, { factor = 1, jitterMs = 0, seed = 21, source = sl
     },
     nextAt(sim) {
       if (!times) this._init(sim);
-      // 拍線用完了但還沒奏完（中間有一下被擋、慢了一拍；或在起音模式下一拍按一下，比音少）：真人會照同樣的拍子繼續揮到音樂結束（上限 400 下）
-      if (i >= times.length && times.length >= 2 && extra < 400 && !sim.sched.isFinished()) {
+      // 拍線用完了但還沒奏完（中間有一下被擋、慢了一拍；或在起音模式下一拍按一下，比音少）：真人會照同樣的拍子繼續揮到音樂結束（上限 2000 下）
+      if (i >= times.length && times.length >= 2 && extra < 2000 && !sim.sched.isFinished()) {
         const g = sim.sched.inspect().groups.find((x) => x.slot === slot);
         if (g.groupEnd < g.segments.length || g.credit) { times.push(times.at(-1) + (times.at(-1) - times.at(-2))); extra++; }
       }
@@ -265,8 +271,8 @@ export function onsetBot(slot, { factor = 1, jitterMs = 0, seed = 31, minGapMs =
         }
         times = times.map((t) => t + (r() * 2 - 1) * jitterMs);
       }
-      // 自己的音按完了但還沒奏完（有幾下被擋、被鎖）：照最後的間隔繼續按到結束（上限 400 下）
-      if (i >= times.length && times.length >= 2 && extra < 400 && !sim.sched.isFinished()) {
+      // 自己的音按完了但還沒奏完（有幾下被擋、被鎖）：照最後的間隔繼續按到結束（上限 2000 下）
+      if (i >= times.length && times.length >= 2 && extra < 2000 && !sim.sched.isFinished()) {
         const g = sim.sched.inspect().groups.find((x) => x.slot === slot);
         if (g.groupEnd < g.segments.length || g.credit) { times.push(times.at(-1) + Math.max(minGapMs, times.at(-1) - times.at(-2))); extra++; }
       }

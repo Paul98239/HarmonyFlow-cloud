@@ -209,6 +209,11 @@ const BEAT_DEBOUNCE_FLOOR = 0.9;  // 拍子模式：兩下之間至少隔「這�
 export const SUBSTITUTE_VELOCITY = SUBSTITUTE_GAIN;
 
 // 依他的模式設定速度追蹤（去抖方式、估速視窗、速度區間）
+// 合奏不再等任何人（帶頭的人放了最後一組、合奏跟著的人被電腦代打）時，之後照最後的速度一路走到曲尾。那個速度可能是怪的（很稀疏的聲部一下一拍按、
+// 被鎖吃掉的間隔、亂按），0.03 倍就是剩下的伴奏要爬好幾分鐘、3 倍就是一閃而過——夾在 [FREE_RUN_MIN_RATE, FREE_RUN_MAX_RATE]。正常的速度不受影響
+const FREE_RUN_MIN_RATE = 0.5, FREE_RUN_MAX_RATE = 2;
+const freeRunRate = (rate) => Math.min(FREE_RUN_MAX_RATE, Math.max(FREE_RUN_MIN_RATE, rate));
+
 function applyMode(p) {
   const m = p.mode, b = p.plan.rateBounds;
   p.tempo.configure(m === 'musician' ? { debounce: 'min', window: MUSICIAN_WINDOW_INTERVALS } : m === 'beat' ? { debounce: 'fixed' } : {});
@@ -773,6 +778,29 @@ export class Scheduler {
     return view;
   }
 
+  /**
+   * 給背景樂器（src/score/stageInstruments.js）的靜態資料：每位演奏者（有指派的槽位）一件樂器——他音最多的那個譜表的音色（GM program、是不是鼓組），
+   * 他所有譜表的 id（noteOn／noteOff 事件依 staffId 對到他）與音域。只在載入、改指派時重建。
+   */
+  instrumentView() {
+    if (this._instrumentCache?.plan === this._plan) return this._instrumentCache.view;
+    const bySlot = new Map();
+    for (const s of this._plan.staves.values()) {
+      if (s.kind !== 'human' || s.slot === null) continue;
+      let e = bySlot.get(s.slot);
+      if (!e) bySlot.set(s.slot, (e = { slot: s.slot, staffIds: [], main: null, lo: 127, hi: 0 }));
+      e.staffIds.push(s.id);
+      if (!e.main || s.notes.length > e.main.notes.length) e.main = s;
+      for (const n of s.notes) { if (n.midiNote < e.lo) e.lo = n.midiNote; if (n.midiNote > e.hi) e.hi = n.midiNote; }
+    }
+    const view = [...bySlot.values()].filter((e) => e.main).map((e) => ({
+      slot: e.slot, staffIds: e.staffIds, program: e.main.program ?? 0, isDrum: !!e.main.percussionKit || e.main.channel % 16 === 9,
+      lo: Math.min(e.lo, e.hi), hi: Math.max(e.lo, e.hi),
+    }));
+    this._instrumentCache = { plan: this._plan, view };
+    return view;
+  }
+
   // 給演奏者看的狀態（見 viewState()）
   _stateOf(p) {
     const n = p.plan.driverSegs.length;
@@ -869,9 +897,8 @@ export class Scheduler {
   _restBefore(p, index = p.cursor) {
     const next = p.plan.driverTicks[index], rests = p.plan.rests;
     if (next === undefined || !rests.length) return null;
-    let lo = 0, hi = rests.length;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (rests[mid][1] < next) lo = mid + 1; else hi = mid; }
-    return rests[lo]?.[1] === next ? rests[lo] : null;
+    const r = rests[lowerBound(p.plan.restEnds, next)];   // 第一段結束不早於這個起音的休止
+    return r?.[1] === next ? r : null;
   }
 
   // 合奏位置落在他下一個起音前面的那段休止裡（不管還剩幾拍），而且那段休止夠長、可能讓帶頭的人交棒（≥ ENSEMBLE.REST_HANDOVER_BEATS 拍；斷奏的短空檔不算）
@@ -887,9 +914,7 @@ export class Scheduler {
     const rests = p.plan.rests;
     if (!rests.length) return false;
     const e = this.getPositionTicks();
-    let lo = 0, hi = rests.length;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (rests[mid][1] <= e) lo = mid + 1; else hi = mid; }
-    const r = rests[lo];
+    const r = rests[upperBound(p.plan.restEnds, e)];   // 第一段結束在合奏位置之後的休止
     return !!r && r[0] > e && this._beatsBetween(e, r[0]) < ENSEMBLE.REST_HANDOVER_BEATS && this._beatsBetween(r[0], r[1]) >= ENSEMBLE.REST_HANDOVER_BEATS;
   }
 
@@ -989,9 +1014,8 @@ export class Scheduler {
     if (L.status === 'ok') this._setStatus(L, 'trouble', 'absent', clock);
     this._setStatus(L, 'substitute', 'absent', clock);
     L.lastAutoMs = null;
-    const pos = snapTick(this.getPositionTicks());
-    this._substituteFrom(L, pos, clock);
-    this._jumpEnsemble(pos, clock, L.tempo.playbackRate);   // 合奏從這裡重新對時，不再停在他的起音（排到曲尾，代打的人跟著）
+    // 合奏從這裡重新對時，不再停在他的起音（排到曲尾）；他的代打由 _jumpEnsemble 的 _resyncSubstitutes 照新的錨點排
+    this._jumpEnsemble(snapTick(this.getPositionTicks()), clock, this._ensemble.anchor?.rate ?? L.tempo.playbackRate);
   }
 
   // 他第一個錯過的那一下前面是夠長的休止（ENSEMBLE.IDLE_REST_BEATS）時，合奏走到那個起音的時鐘時刻；不是就 null。剛開始錯過時算：合奏錨點還是最近的，往回推得準
@@ -1063,7 +1087,7 @@ export class Scheduler {
     }
     q.clock = mergeByDue(autos, controls);
     for (const it of q.clock) it.seq = ++this._seq;
-    q.groupEnd = end;
+    q.groupEnd = Math.max(q.cursor, end);   // 合奏停在他前面（新的帶頭者落在後面）：這次沒有要替他排的，但「排到哪」不能退到游標之前
     q.anchor = { slice: q.cursor, clockMs: a.clockMs, scoreSec: a.scoreSec, rate };
   }
 
@@ -1080,6 +1104,8 @@ export class Scheduler {
     const last = sent - 1, lastMs = last >= p.cursor ? dueOf(last) : p.lastAutoMs;
     const nextMs = sent < ticks.length ? dueOf(sent) : Infinity;
     for (const it of p.clock) if (it.autoRelease !== undefined && it.autoRelease < sent) this._autoRelease(p, it.autoRelease, it.dueMs);
+    // 已經響過、卻沒有排自動放行的起音（重排時合奏停在他前面）：游標一樣要推過去，不然他接手後的下一下會把它再彈一次
+    for (let s = p.cursor; s < sent; s++) this._autoRelease(p, s, dueOf(s));
     const take = last >= 0 && lastMs !== null && Math.abs(motion - lastMs) <= Math.abs(nextMs - motion);
     p.timed = [];
     p.clock = p.clock.filter((c) => c.autoRelease === undefined);   // 他的控制器照舊；起音與音不再由電腦放
@@ -1117,7 +1143,9 @@ export class Scheduler {
       && (p === cur || !this._racing(p, clock));
     let slot = pickLeader(slots, (s) => ok(at(s)));
     if (slot === null && (!cur || gone)) {
-      slot = pickLeader(slots, (s) => at(s) !== cur && this._isCandidate(at(s), null, clock, entering, 'trouble') && !this._stallWhy(at(s), clock))
+      // 候補（也出過狀況的人）：要比停住的現任更近才按過（人還在鏡頭裡、只是停手的現任，換給更早就停手的人，合奏只是換一個人等）；現任離開鏡頭時不比
+      const fresher = (q) => !cur || stall === 'absent' || q.lastTriggerMs > cur.lastTriggerMs;
+      slot = pickLeader(slots, (s) => at(s) !== cur && this._isCandidate(at(s), null, clock, entering, 'trouble') && !this._stallWhy(at(s), clock) && fresher(at(s)))
         ?? pickLeader(slots, (s) => at(s) !== cur && this._isRestingStandIn(at(s)));
     }
     const next = slot === null ? null : at(slot);
@@ -1135,7 +1163,10 @@ export class Scheduler {
     const E = this._ensemble, cur = E.leader;
     this.events.queue('leader', { from: cur?.slot ?? null, to: next?.slot ?? null, reason, clockMs: clock });
     E.leaderSinceMs = clock;
-    if (!E.anchor || (!cur && this._ensembleNextTick(next) === this._ensembleNextTick())) { E.leader = next; return; }
+    // 「合奏原本就在等他」要連錨點都是他的（或他還沒開始）：他在沒有人帶頭時自己按過（揮手還沒確認、被移出名單又回來），他那一段只排了他自己的音，
+    // 合奏的錨點還停在之前——照一般的換人重新對時，不然那一段的伴奏永遠不會排（既沒響也沒被跳過）
+    const waiting = !cur && this._ensembleNextTick(next) === this._ensembleNextTick() && (!next?.anchor || next.anchor === E.anchor);
+    if (!E.anchor || waiting) { E.leader = next; return; }
     // 已經到期、tick 還沒來得及放的照常先放（暫停中改指派時不放），再量合奏位置（照舊的帶頭者算）
     if (this._playing) { this._emitTimed(clock); this._emitClock(clock); }
     const ePos = this._positionAt(clock);
@@ -1147,6 +1178,12 @@ export class Scheduler {
       if (nt !== undefined) sec = Math.min(sec, this._secOf(nt));
       target = Math.max(target, snapTick(this._score.secondsToMIDITicks(sec)));
     }
+    // 新帶頭者被超前鎖住（揮手按得比合奏早、已經按了下一個音，等合奏追上來才放）：合奏現在跟著他，不能再讓他等合奏——
+    // 合奏直接走到放出點，下一個 tick 就放出他按的那一下。不然合奏照舊錨點的速度慢慢爬過去，這段時間他按什麼都沒反應
+    if (next?.credit?.kind === 'ahead') {
+      const t = next.plan.driverTicks[next.groupEnd];
+      if (t !== undefined) target = Math.max(target, snapTick(this._ticksBefore(t, ENSEMBLE.AHEAD_RELEASE_BEATS)));
+    }
     this._jumpEnsemble(snapTick(target), clock, this._holdOwner().tempo.playbackRate);
   }
 
@@ -1154,6 +1191,7 @@ export class Scheduler {
   // （還該響著的追音、整顆在身後的跳過），控制器軌帶到 toTick 之前的狀態、這段的整體參數 SysEx 馬上送；伴奏 hold 著的音：新帶頭者還沒按到的起音照舊等，
   // 其餘（等的起音在 toTick 之前、或新帶頭者在那個 tick 沒有起音）改成依新錨點、合奏走到它的結尾時收；再從 toTick 起依新帶頭者排伴奏。
   _jumpEnsemble(toTick, clock, rate) {
+    if (this._ensembleHorizonTick() === Infinity) rate = freeRunRate(rate);   // 合奏之後不再等任何人：照合理的速度走到曲尾
     const E = this._ensemble, A = this._plan.accompaniment, from = E.floorTick;
     E.timed = [];
     E.clock = [];
@@ -1243,13 +1281,14 @@ export class Scheduler {
   // 近距起音分組（lastSlice > slice）：組頭 j 啟動第 j＋1 段到第 lastSlice 段（組裡每個起音之間的段，到下一個組頭為止），用同一個錨點；組裡被併入的起音的音像電腦音一樣排時刻（own：走他的合成器、帶 lookahead 時間戳，同 tick 排在電腦音前面），
   // 另外每個起音排一個自動放行（_autoRelease），跟送他的合成器的控制器依時刻排在一起。
   _anchorSlice(p, slice, clockMs, scoreSec, rate, fromTick = -Infinity, lastSlice = slice, ownMode = null, withEnsemble = false) {
+    const { driverSegs, driverTicks, controls, controlTicks } = p.plan;
+    const lo = slice === 0 ? -Infinity : driverTicks[slice - 1];
+    const hi = lastSlice < driverTicks.length ? driverTicks[lastSlice] : Infinity;
+    if (withEnsemble && hi === Infinity) rate = freeRunRate(rate);   // 他最後一組：合奏之後自己走到曲尾（見 freeRunRate）
     const anchor = { slice, clockMs, scoreSec, rate };
     p.anchor = anchor;
     this.events.queue('anchor', { group: p.index, slot: p.slot, slice, clockMs, scoreSec, rate, ensemble: withEnsemble });   // ensemble：這個錨點也是合奏的（伴奏跟著它）
     p.anchoredSlice = lastSlice;
-    const { driverSegs, driverTicks, controls, controlTicks } = p.plan;
-    const lo = slice === 0 ? -Infinity : driverTicks[slice - 1];
-    const hi = lastSlice < driverTicks.length ? driverTicks[lastSlice] : Infinity;
     const dueOf = (tick) => clockMs + ((this._secOf(tick) - scoreSec) * 1000) / rate;
     const own = [], autos = [], human = [];
     for (let s = slice; s < lastSlice; s++) {
@@ -1309,6 +1348,7 @@ export class Scheduler {
   }
 
   _trigger(ev) {
+    this._groupExprAt = NaN;   // 這一下會改他的表情、最近觸發的時刻
     const p = this._bySlot.get(ev.slot);   // 這個槽位的演奏者；找不到＝沒有資格觸發
     if (!this._playing || !p || (p.status !== 'substitute' && p.groupEnd >= p.plan.driverSegs.length)) return false;
     this._ensureEnsembleAnchored();
@@ -1363,8 +1403,9 @@ export class Scheduler {
     // 不是要提早放下一拍：不加音（檔案裡這一拍他沒有新的音）、不往前，只算他正在彈。不然跟著拍子揮的人每逢長音就把下一拍提早放出來，越彈越趕。
     if (p.mode === 'beat' && p.lastHead !== null && this._beatKeeping(p, j, motion)) { this._pressEvent(p, ev, clock, this._beatHold(p, j, motion)); return false; }
     // 超前鎖住期間再觸發：只算一下（照樣記進按鍵記錄）
-    if (p.credit?.kind === 'ahead') { this._pressEvent(p, ev, clock, 'ahead'); return false; }
-    if (p.credit?.kind === 'beat') { this._pressEvent(p, ev, clock, 'beat'); return false; }   // 這一拍已經開始、他的切分音還沒到：再按也只算一下
+    // 這兩種被吃掉的按鍵告訴估速：下一個被接受的間隔不是他的速度（tempo.interrupt()）
+    if (p.credit?.kind === 'ahead') { p.tempo.interrupt(); this._pressEvent(p, ev, clock, 'ahead'); return false; }
+    if (p.credit?.kind === 'beat') { p.tempo.interrupt(); this._pressEvent(p, ev, clock, 'beat'); return false; }   // 這一拍已經開始、他的切分音還沒到：再按也只算一下
 
     // 去抖（tempo.js 的 attempt()）：這一步依目前速度預估的真實長度，從他上一次按下的起音（組頭）算起（第一下沒有上一個，去抖不會用到）。
     // 去抖與估速都用動作時刻：程式收到的時刻多了輸入與確認的延遲（揮手確認要等手回升），不是他的節奏
@@ -1453,7 +1494,7 @@ export class Scheduler {
     const lineSec = i >= 0 ? this._secOf(lines[i]) : this._secOf(pos);
     const prev = this._prevPressSec(p);
     const stepSec = prev === null ? 0 : lineSec - prev;
-    if (prev !== null && stepSec <= 0.25 * (this._beatMsNow() / 1000) * p.tempo.playbackRate) { p.tempo.attempt(motion, Infinity); return 'blocked'; }
+    if (prev !== null && stepSec <= 0.25 * (this._beatMsNow() / 1000) * p.tempo.playbackRate) { p.tempo.attempt(motion, Infinity); p.tempo.ignored(motion); return 'blocked'; }
     if (p.tempo.attempt(motion, (stepSec * 1000) / p.tempo.playbackRate, (BEAT_DEBOUNCE_FLOOR * stepSec * 1000) / BEAT_MODE_MAX_RATE)) return 'blocked';
     this._accept(p, Math.max(1, j), lineSec, prev, motion);
     return 'hold';
@@ -1872,7 +1913,14 @@ export class Scheduler {
 
   // 伴奏跟著的表情：多人時一半看帶頭的人、一半看其他正在彈（不是代打、最近有觸發）的人的平均——合奏的情緒是大家的，不是只有帶頭的那一個；
   // 一個人時就是他（跟原本一樣）。
+  // 每顆伴奏音都會問：同一個時鐘時刻只算一次（觸發、表情更新時清掉）
   _groupExpression() {
+    if (this._groupExprAt === this._clockMs) return this._groupExprValue;
+    this._groupExprAt = this._clockMs;
+    return (this._groupExprValue = this._computeGroupExpression());
+  }
+
+  _computeGroupExpression() {
     const L = this._ensemble.leader;
     const win = threshold(ENSEMBLE.ACTIVE_BEATS, ENSEMBLE.ACTIVE_MIN_MS, this._score ? this._beatMsNow() : 500);
     let sum = 0, n = 0;
@@ -1896,6 +1944,7 @@ export class Scheduler {
   setExpression(slot, value) {
     const p = this._bySlot.get(slot);
     if (!p) return;
+    this._groupExprAt = NaN;
     if (value === null || !Number.isFinite(value)) { p.expressionFromCamera = false; return; }
     p.expressionFromCamera = true;
     p.expression = Math.min(1, Math.max(0, value));

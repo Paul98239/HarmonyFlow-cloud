@@ -81,6 +81,8 @@
           </button>
         </div>
         <div id="midiStatusText" class="player-status-bar">等待選擇歌曲...</div>
+        <!-- 播放時間「已播／全長」：跟頂端時間條同一個來源（src/midi/midiPlayer.js 的 renderTopProgress()），長輩一眼看得出還剩多久 -->
+        <span id="songTime" class="song-time" hidden></span>
       </div>
       <div class="control-row" id="control-row">
         <!-- 系統控制：鏡頭開關／現場人數／重置骨架 ID。人數同時是 MediaPipe 的 numPoses 與追蹤槽位數（1~4），
@@ -142,6 +144,8 @@
           <!-- 永久黑幕：攝影機畫面刻意不顯示，鏡頭與追蹤照常在背景運作（見 vision.js），
                這裡純粹是視覺遮蓋，沒有任何切換方式。 -->
           <div id="stage-blackout"></div>
+          <!-- 背景的樂器：每位演奏者的聲部一件，照他實際發出的音動作（src/score/stageInstruments.js）。在背景之上、骨架之下 -->
+          <canvas id="instrument-canvas" aria-hidden="true" hidden></canvas>
         </div>
         <div id="stage-hint" role="status" aria-live="polite" hidden></div>
         <!-- 樂譜面板：每位演奏者一條（播放中才顯示）。左邊是狀態（src/score/performerHud.js：誰、目前的模式、演奏中／落後／代打中…、智能切換的建議），

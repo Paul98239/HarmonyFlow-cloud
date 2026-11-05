@@ -301,9 +301,14 @@ export function reassign(score, assignments) {
 // AudioContext 不在跑時恢復：'suspended'（還沒有使用者手勢、或被瀏覽器暫停）與 Safari 的 'interrupted'（來電、Siri、切到別的 app）都要 resume；
 // 'closed' 不能恢復。resume() 在沒有使用者手勢時可能一直不 resolve（Safari），所以最多等 RESUME_WAIT_MS，之後照常播（排程器沒有音訊時鐘時不提早送、不帶時間戳）
 const RESUME_WAIT_MS = 1500;
+// 回傳聲音有沒有在跑：沒有的話呼叫端照常播，但播放器要告訴使用者（不然合奏照走卻沒聲音）
 async function ensureRunning() {
-  if (!audioCtx || audioCtx.state === 'running' || audioCtx.state === 'closed') return;
-  try { await Promise.race([audioCtx.resume(), new Promise((r) => setTimeout(r, RESUME_WAIT_MS))]); } catch (e) { console.warn('AudioContext 恢復失敗', e); }
+  if (!audioCtx || audioCtx.state === 'closed') return false;
+  if (audioCtx.state === 'running') return true;
+  let timer;
+  try { await Promise.race([audioCtx.resume(), new Promise((r) => { timer = setTimeout(r, RESUME_WAIT_MS); })]); } catch (e) { console.warn('AudioContext 恢復失敗', e); }
+  finally { clearTimeout(timer); }
+  return audioCtx?.state === 'running';
 }
 // 音訊狀態改變（'running'／'suspended'／'interrupted'／'closed'）時通知播放器：播放中聲音被系統中斷，播放器先暫停演奏（見 midiPlayer.js）
 let audioStateListener = null;
@@ -314,8 +319,9 @@ export async function play() {
   if (isProcessingPlay || !isSongLoaded) return;
   isProcessingPlay = true;
   try {
-    await ensureRunning();
+    const ok = await ensureRunning();
     scheduler.play();
+    return ok;
   } finally { isProcessingPlay = false; }
 }
 // 從頭重播（重播鍵、播完後按 ▶）：同 play() 先確保 AudioContext 已恢復（使用者手勢），重設的內容見 scheduler.js 的 _resetPlayback()
@@ -323,8 +329,9 @@ export async function restart() {
   if (isProcessingPlay || !isSongLoaded) return;
   isProcessingPlay = true;
   try {
-    await ensureRunning();
+    const ok = await ensureRunning();
     scheduler.restart();
+    return ok;
   } finally { isProcessingPlay = false; }
 }
 export function pause() {

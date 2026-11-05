@@ -12,7 +12,7 @@ test('模糊測試（150 個隨機案例；完整的跑 node test/tools/fuzz.mjs
   const bad = [];
   for (let seed = 1; seed <= 150; seed++) {
     const c = fuzzCase(seed);
-    c.sim.runToEnd((c.score.durationSeconds * 3 + 60) * 1000);
+    c.sim.runToEnd(c.limitMs);
     let v = violations(c.sim, { finished: c.expectFinish });
     if (!c.sim.sched.isFinished()) v = v.filter((x) => !x.startsWith('卡音'));
     if (v.length) bad.push(`種子 ${seed}：${v.join('；')}`);
